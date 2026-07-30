@@ -58,12 +58,12 @@ export class Coder {
                 }
                 
                 if (no_code_failures >= MAX_NO_CODE) {
-                    console.warn("Action failed, agent would not write code.");
-                    return 'Action failed, agent would not write code.';
+                    console.warn("操作失败，代理没有编写代码。");
+                    return '操作失败，代理没有编写代码。';
                 }
                 messages.push({
                     role: 'system', 
-                    content: 'Error: no code provided. Write code in codeblock in your response. ``` // example ```'}
+                    content: '错误：没有提供代码。请在回复中使用代码块编写代码。``` // 示例 ```'}
                 );
                 console.warn("No code block generated. Trying again.");
                 no_code_failures++;
@@ -89,7 +89,7 @@ export class Coder {
                 await executionModule.main(this.agent.bot);
 
                 const code_output = this.agent.actions.getBotOutputSummary();
-                const summary = "Agent wrote this code: \n```" + this._sanitizeCode(code) + "```\nCode Output:\n" + code_output;
+                const summary = "代理编写了以下代码：\n```" + this._sanitizeCode(code) + "```\n代码输出：\n" + code_output;
                 return summary;
             } catch (e) {
                 if (this.agent.bot.interrupt_code)
@@ -106,11 +106,11 @@ export class Coder {
                 });
                 messages.push({
                     role: 'system',
-                    content: `Code Output:\n${code_output}\nCODE EXECUTION THREW ERROR: ${e.toString()}\n Please try again:`
+                    content: `代码输出：\n${code_output}\n代码执行抛出错误：${e.toString()}\n 请重试：`
                 });
             }
         }
-        return `Code generation failed after ${MAX_ATTEMPTS} attempts.`;
+        return `代码生成在 ${MAX_ATTEMPTS} 次尝试后失败。`;
     }
     
     async  _lintCode(code) {

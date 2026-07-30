@@ -35,8 +35,8 @@ export const actionsList = [
         perform: async function(agent, prompt) {
             // just ignore prompt - it is now in context in chat history
             if (!settings.allow_insecure_coding) { 
-                agent.openChat('newAction is disabled. Enable with allow_insecure_coding=true in settings.js');
-                return "newAction not allowed! Code writing is disabled in settings. Notify the user.";
+                agent.openChat('newAction 已禁用。请在 settings.js 中设置 allow_insecure_coding=true 来启用。');
+                return "newAction 不允许！代码编写功能已在设置中禁用。请通知用户。";
             }
             let result = "";
             const actionFn = async () => {
@@ -68,7 +68,7 @@ export const actionsList = [
         name: '!stfu',
         description: 'Stop all chatting and self prompting, but continue current action.',
         perform: async function (agent) {
-            agent.openChat('Shutting up.');
+            agent.openChat('闭嘴了。');
             agent.shutUp();
             return;
         }

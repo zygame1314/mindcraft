@@ -45,7 +45,7 @@ export async function craftRecipe(bot, itemName, num=1) {
     let placedTable = false;
 
     if (mc.getItemCraftingRecipes(itemName).length == 0) {
-        log(bot, `${itemName} is either not an item, or it does not have a crafting recipe!`);
+        log(bot, `${itemName} 不是物品，或者没有合成配方！`);
         return false;
     }
 
@@ -73,7 +73,7 @@ export async function craftRecipe(bot, itemName, num=1) {
                 }
             }
             else {
-                log(bot, `Crafting ${itemName} requires a crafting table.`)
+                log(bot, `合成 ${itemName} 需要工作台。`)
                 return false;
             }
         }
@@ -82,7 +82,7 @@ export async function craftRecipe(bot, itemName, num=1) {
         }
     }
     if (!recipes || recipes.length === 0) {
-        log(bot, `You do not have the resources to craft a ${itemName}. It requires: ${Object.entries(mc.getItemCraftingRecipes(itemName)[0][0]).map(([key, value]) => `${key}: ${value}`).join(', ')}.`);
+        log(bot, `你没有足够的资源合成 ${itemName}。需要: ${Object.entries(mc.getItemCraftingRecipes(itemName)[0][0]).map(([key, value]) => `${key}: ${value}`).join(', ')}。`);
         if (placedTable) {
             await collectBlock(bot, 'crafting_table', 1);
         }
@@ -101,8 +101,8 @@ export async function craftRecipe(bot, itemName, num=1) {
     const craftLimit = mc.calculateLimitingResource(inventory, requiredIngredients);
     
     await bot.craft(recipe, Math.min(craftLimit.num, num), craftingTable);
-    if(craftLimit.num<num) log(bot, `Not enough ${craftLimit.limitingResource} to craft ${num}, crafted ${craftLimit.num}. You now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
-    else log(bot, `Successfully crafted ${itemName}, you now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
+        if(craftLimit.num<num) log(bot, `${craftLimit.limitingResource} 不够合成 ${num} 个，只合成了 ${craftLimit.num} 个。你现在有 ${world.getInventoryCounts(bot)[itemName]} 个 ${itemName}。`);
+        else log(bot, `成功合成了 ${itemName}，你现在有 ${world.getInventoryCounts(bot)[itemName]} 个 ${itemName}。`);
     if (placedTable) {
         await collectBlock(bot, 'crafting_table', 1);
     }
@@ -152,7 +152,7 @@ export async function smeltItem(bot, itemName, num=1) {
      **/
 
     if (!mc.isSmeltable(itemName)) {
-        log(bot, `Cannot smelt ${itemName}. Hint: make sure you are smelting the 'raw' item.`);
+        log(bot, `无法冶炼 ${itemName}。提示：确保你在冶炼的是'生'物品。`);
         return false;
     }
 
@@ -171,7 +171,7 @@ export async function smeltItem(bot, itemName, num=1) {
         }
     }
     if (!furnaceBlock){
-        log(bot, `There is no furnace nearby and you have no furnace.`)
+        log(bot, `附近没有熔炉，你也没有熔炉。`)
         return false;
     }
     if (bot.entity.position.distanceTo(furnaceBlock.position) > 4) {
@@ -187,7 +187,7 @@ export async function smeltItem(bot, itemName, num=1) {
     if (input_item && input_item.type !== mc.getItemId(itemName) && input_item.count > 0) {
         // TODO: check if furnace is currently burning fuel. furnace.fuel is always null, I think there is a bug.
         // This only checks if the furnace has an input item, but it may not be smelting it and should be cleared.
-        log(bot, `The furnace is currently smelting ${mc.getItemName(input_item.type)}.`);
+        log(bot, `熔炉正在冶炼 ${mc.getItemName(input_item.type)}。`);
         if (placedFurnace)
             await collectBlock(bot, 'furnace', 1);
         return false;
@@ -195,7 +195,7 @@ export async function smeltItem(bot, itemName, num=1) {
     // check if the bot has enough items to smelt
     let inv_counts = world.getInventoryCounts(bot);
     if (!inv_counts[itemName] || inv_counts[itemName] < num) {
-        log(bot, `You do not have enough ${itemName} to smelt.`);
+        log(bot, `你没有足够的 ${itemName} 来冶炼。`);
         if (placedFurnace)
             await collectBlock(bot, 'furnace', 1);
         return false;
@@ -205,23 +205,23 @@ export async function smeltItem(bot, itemName, num=1) {
     if (!furnace.fuelItem()) {
         let fuel = mc.getSmeltingFuel(bot);
         if (!fuel) {
-            log(bot, `You have no fuel to smelt ${itemName}, you need coal, charcoal, or wood.`);
+            log(bot, `你没有燃料来冶炼 ${itemName}，需要煤炭、木炭或木头。`);
             if (placedFurnace)
                 await collectBlock(bot, 'furnace', 1);
             return false;
         }
-        log(bot, `Using ${fuel.name} as fuel.`);
+        log(bot, `使用 ${fuel.name} 作为燃料。`);
 
         const put_fuel = Math.ceil(num / mc.getFuelSmeltOutput(fuel.name));
 
         if (fuel.count < put_fuel) {
-            log(bot, `You don't have enough ${fuel.name} to smelt ${num} ${itemName}; you need ${put_fuel}.`);
+            log(bot, `你没有足够的 ${fuel.name} 来冶炼 ${num} 个 ${itemName}；需要 ${put_fuel}。`);
             if (placedFurnace)
                 await collectBlock(bot, 'furnace', 1);
             return false;
         }
         await furnace.putFuel(fuel.type, null, put_fuel);
-        log(bot, `Added ${put_fuel} ${mc.getItemName(fuel.type)} to furnace fuel.`);
+        log(bot, `向熔炉添加了 ${put_fuel} 个 ${mc.getItemName(fuel.type)} 作为燃料。`);
         console.log(`Added ${put_fuel} ${mc.getItemName(fuel.type)} to furnace fuel.`)
     }
     // put the items in the furnace
@@ -261,14 +261,14 @@ export async function smeltItem(bot, itemName, num=1) {
         await collectBlock(bot, 'furnace', 1);
     }
     if (total === 0) {
-        log(bot, `Failed to smelt ${itemName}.`);
+        log(bot, `冶炼 ${itemName} 失败。`);
         return false;
     }
     if (total < num) {
-        log(bot, `Only smelted ${total} ${mc.getItemName(smelted_item.type)}.`);
+        log(bot, `只冶炼了 ${total} 个 ${mc.getItemName(smelted_item.type)}。`);
         return false;
     }
-    log(bot, `Successfully smelted ${itemName}, got ${total} ${mc.getItemName(smelted_item.type)}.`);
+        log(bot, `成功冶炼了 ${itemName}，获得了 ${total} 个 ${mc.getItemName(smelted_item.type)}。`);
     return true;
 }
 
@@ -282,7 +282,7 @@ export async function clearNearestFurnace(bot) {
      **/
     let furnaceBlock = world.getNearestBlock(bot, 'furnace', 32);
     if (!furnaceBlock) {
-        log(bot, `No furnace nearby to clear.`);
+        log(bot, `附近没有熔炉可以清空。`);
         return false;
     }
     if (bot.entity.position.distanceTo(furnaceBlock.position) > 4) {
@@ -304,7 +304,7 @@ export async function clearNearestFurnace(bot) {
     let smelted_name = smelted_item ? `${smelted_item.count} ${smelted_item.name}` : `0 smelted items`;
     let input_name = intput_item ? `${intput_item.count} ${intput_item.name}` : `0 input items`;
     let fuel_name = fuel_item ? `${fuel_item.count} ${fuel_item.name}` : `0 fuel items`;
-    log(bot, `Cleared furnace, received ${smelted_name}, ${input_name}, and ${fuel_name}.`);
+        log(bot, `清空了熔炉，获得了 ${smelted_name}、${input_name} 和 ${fuel_name}。`);
     return true;
 
 }
@@ -327,7 +327,7 @@ export async function attackNearest(bot, mobType, kill=true) {
     if (mob) {
         return await attackEntity(bot, mob, kill);
     }
-    log(bot, 'Could not find any '+mobType+' to attack.');
+        log(bot, '附近没有找到 ' + mobType + ' 可以攻击。');
     return false;
 }
 
@@ -361,7 +361,7 @@ export async function attackEntity(bot, entity, kill=true) {
                 return false;
             }
         }
-        log(bot, `Successfully killed ${entity.name}.`);
+        log(bot, `成功击杀了 ${entity.name}。`);
         await pickupNearbyItems(bot);
         return true;
     }
@@ -406,9 +406,9 @@ export async function defendSelf(bot, range=9) {
     }
     bot.pvp.stop();
     if (attacked)
-        log(bot, `Successfully defended self.`);
+        log(bot, `成功自卫。`);
     else
-        log(bot, `No enemies nearby to defend self from.`);
+        log(bot, `附近没有敌人需要自卫。`);
     return attacked;
 }
 
@@ -426,7 +426,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
      * await skills.collectBlock(bot, "oak_log");
      **/
     if (num < 1) {
-        log(bot, `Invalid number of blocks to collect: ${num}.`);
+        log(bot, `要收集的方块数量无效: ${num}。`);
         return false;
     }
     let blocktypes = [blockType];
@@ -471,9 +471,9 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
 
         if (blocks.length === 0) {
             if (collected === 0)
-                log(bot, `No ${blockType} nearby to collect.`);
+                log(bot, `附近没有 ${blockType} 可以收集。`);
             else
-                log(bot, `No more ${blockType} nearby to collect.`);
+                log(bot, `附近没有更多 ${blockType} 可以收集。`);
             break;
         }
         const block = blocks[0];
@@ -481,14 +481,14 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         if (isLiquid) {
             const bucket = bot.inventory.findInventoryItem('bucket');
             if (!bucket) {
-                log(bot, `Don't have bucket to harvest ${blockType}.`);
+                log(bot, `没有桶来采集 ${blockType}。`);
                 return false;
             }
             await bot.equip(bucket, 'hand');
         }
         const itemId = bot.heldItem ? bot.heldItem.type : null
         if (!block.canHarvest(itemId)) {
-            log(bot, `Don't have right tools to harvest ${blockType}.`);
+            log(bot, `没有合适的工具来采集 ${blockType}。`);
             return false;
         }
         try {
@@ -512,11 +512,11 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         }
         catch (err) {
             if (err.name === 'NoChests') {
-                log(bot, `Failed to collect ${blockType}: Inventory full, no place to deposit.`);
+                log(bot, `收集 ${blockType} 失败：背包已满，没有地方存放。`);
                 break;
             }
             else {
-                log(bot, `Failed to collect ${blockType}: ${err}.`);
+                log(bot, `收集 ${blockType} 失败：${err}。`);
                 continue;
             }
         }
@@ -524,7 +524,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         if (bot.interrupt_code)
             break;  
     }
-    log(bot, `Collected ${collected} ${blockType}.`);
+        log(bot, `收集了 ${collected} 个 ${blockType}。`);
     return collected > 0;
 }
 
@@ -553,7 +553,7 @@ export async function pickupNearbyItems(bot) {
         }
         pickedUp++;
     }
-    log(bot, `Picked up ${pickedUp} items.`);
+        log(bot, `捡起了 ${pickedUp} 个物品。`);
     return true;
 }
 
@@ -577,7 +577,7 @@ export async function breakBlockAt(bot, x, y, z) {
             if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
             let msg = '/setblock ' + Math.floor(x) + ' ' + Math.floor(y) + ' ' + Math.floor(z) + ' air';
             bot.chat(msg);
-            log(bot, `Used /setblock to break block at ${x}, ${y}, ${z}.`);
+            log(bot, `使用 /setblock 破坏了 ${x}, ${y}, ${z} 处的方块。`);
             return true;
         }
 
@@ -593,15 +593,15 @@ export async function breakBlockAt(bot, x, y, z) {
             await bot.tool.equipForBlock(block);
             const itemId = bot.heldItem ? bot.heldItem.type : null
             if (!block.canHarvest(itemId)) {
-                log(bot, `Don't have right tools to break ${block.name}.`);
+                log(bot, `没有合适的工具来破坏 ${block.name}。`);
                 return false;
             }
         }
         await bot.dig(block, true);
-        log(bot, `Broke ${block.name} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
+        log(bot, `破坏了 ${block.name}，位置 x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}。`);
     }
     else {
-        log(bot, `Skipping block at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)} because it is ${block.name}.`);
+        log(bot, `跳过 x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)} 处的方块，因为它是 ${block.name}。`);
         return false;
     }
     return true;
@@ -627,7 +627,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
     const target_dest = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
 
     if (blockType === 'air') {
-        log(bot, `Placing air (removing block) at ${target_dest}.`);
+        log(bot, `正在放置空气（移除方块）到 ${target_dest}。`);
         return await breakBlockAt(bot, x, y, z);
     }
 
@@ -635,7 +635,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         if (bot.restrict_to_inventory) {
             let block = bot.inventory.findInventoryItem(blockType);
             if (!block) {
-                log(bot, `Cannot place ${blockType}, you are restricted to your current inventory.`);
+                log(bot, `无法放置 ${blockType}，你被限制在当前背包内。`);
                 return false;
             }
         }
@@ -675,7 +675,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         if (blockType.includes('bed'))
             if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
             bot.chat('/setblock ' + Math.floor(x) + ' ' + Math.floor(y) + ' ' + Math.floor(z-1) + ' ' + blockType + '[part=head]');
-        log(bot, `Used /setblock to place ${blockType} at ${target_dest}.`);
+        log(bot, `使用 /setblock 在 ${target_dest} 放置了 ${blockType}。`);
         return true;
     }
 
@@ -694,21 +694,21 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         block_item = bot.inventory.findInventoryItem(item_name);
     }
     if (!block_item) {
-        log(bot, `Don't have any ${item_name} to place.`);
+        log(bot, `没有 ${item_name} 可以放置。`);
         return false;
     }
 
     const targetBlock = bot.blockAt(target_dest);
     if (targetBlock.name === blockType || (targetBlock.name === 'grass_block' && blockType === 'dirt')) {
-        log(bot, `${blockType} already at ${targetBlock.position}.`);
+        log(bot, `${blockType} 已经在 ${targetBlock.position} 处了。`);
         return false;
     }
     const empty_blocks = ['air', 'water', 'lava', 'grass', 'short_grass', 'tall_grass', 'snow', 'dead_bush', 'fern'];
     if (!empty_blocks.includes(targetBlock.name)) {
-        log(bot, `${targetBlock.name} in the way at ${targetBlock.position}.`);
+        log(bot, `${targetBlock.name} 挡住了 ${targetBlock.position} 处的位置。`);
         const removed = await breakBlockAt(bot, x, y, z);
         if (!removed) {
-            log(bot, `Cannot place ${blockType} at ${targetBlock.position}: block in the way.`);
+            log(bot, `无法在 ${targetBlock.position} 放置 ${blockType}：有方块挡住了。`);
             return false;
         }
         await new Promise(resolve => setTimeout(resolve, 200)); // wait for block to break
@@ -733,7 +733,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
     }
     else {
         dirs.push(dir_map['bottom']);
-        log(bot, `Unknown placeOn value "${placeOn}". Defaulting to bottom.`);
+        log(bot, `未知的 placeOn 值 "${placeOn}"。默认使用 bottom。`);
     }
     dirs.push(...Object.values(dir_map).filter(d => !dirs.includes(d)));
 
@@ -746,7 +746,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         }
     }
     if (!buildOffBlock) {
-        log(bot, `Cannot place ${blockType} at ${targetBlock.position}: nothing to place on.`);
+        log(bot, `无法在 ${targetBlock.position} 放置 ${blockType}：没有可放置的支撑面。`);
         return false;
     }
 
@@ -778,12 +778,12 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
             await bot.equip(block_item, 'hand');
             await bot.lookAt(buildOffBlock.position.offset(0.5, 0.5, 0.5));
             await bot.placeBlock(buildOffBlock, faceVec);
-            log(bot, `Placed ${blockType} at ${target_dest}.`);
+            log(bot, `在 ${target_dest} 放置了 ${blockType}。`);
             await new Promise(resolve => setTimeout(resolve, 200));
             return true;
         }
     } catch (err) {
-        log(bot, `Failed to place ${blockType} at ${target_dest}.`);
+        log(bot, `在 ${target_dest} 放置 ${blockType} 失败。`);
         return false;
     }
 }
@@ -799,7 +799,7 @@ export async function equip(bot, itemName) {
      **/
     if (itemName === 'hand') {
         await bot.unequip('hand');
-        log(bot, `Unequipped hand.`);
+        log(bot, `已卸下手持物品。`);
         return true;
     }
     let item = bot.inventory.slots.find(slot => slot && slot.name === itemName);
@@ -809,7 +809,7 @@ export async function equip(bot, itemName) {
             item = bot.inventory.findInventoryItem(itemName);
         }
         else {
-            log(bot, `You do not have any ${itemName} to equip.`);
+            log(bot, `你没有 ${itemName} 可以装备。`);
             return false;
         }
     }
@@ -831,7 +831,7 @@ export async function equip(bot, itemName) {
     else {
         await bot.equip(item, 'hand');
     }
-    log(bot, `Equipped ${itemName}.`);
+        log(bot, `已装备 ${itemName}。`);
     return true;
 }
 
@@ -859,10 +859,10 @@ export async function discard(bot, itemName, num=-1) {
         }
     }
     if (discarded === 0) {
-        log(bot, `You do not have any ${itemName} to discard.`);
+        log(bot, `你没有 ${itemName} 可以丢弃。`);
         return false;
     }
-    log(bot, `Discarded ${discarded} ${itemName}.`);
+        log(bot, `丢弃了 ${discarded} 个 ${itemName}。`);
     return true;
 }
 
@@ -883,7 +883,7 @@ export async function putInChest(bot, itemName, num=-1) {
     }
     let item = bot.inventory.findInventoryItem(itemName);
     if (!item) {
-        log(bot, `You do not have any ${itemName} to put in the chest.`);
+        log(bot, `你没有 ${itemName} 可以放进箱子。`);
         return false;
     }
     let to_put = num === -1 ? item.count : Math.min(num, item.count);
@@ -891,7 +891,7 @@ export async function putInChest(bot, itemName, num=-1) {
     const chestContainer = await bot.openContainer(chest);
     await chestContainer.deposit(item.type, null, to_put);
     await chestContainer.close();
-    log(bot, `Successfully put ${to_put} ${itemName} in the chest.`);
+        log(bot, `成功将 ${to_put} 个 ${itemName} 放入箱子。`);
     return true;
 }
 
@@ -907,7 +907,7 @@ export async function takeFromChest(bot, itemName, num=-1) {
      * **/
     let chest = world.getNearestBlock(bot, 'chest', 32);
     if (!chest) {
-        log(bot, `Could not find a chest nearby.`);
+        log(bot, `附近没有找到箱子。`);
         return false;
     }
     await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2);
@@ -916,7 +916,7 @@ export async function takeFromChest(bot, itemName, num=-1) {
     // Find all matching items in the chest
     let matchingItems = chestContainer.containerItems().filter(item => item.name === itemName);
     if (matchingItems.length === 0) {
-        log(bot, `Could not find any ${itemName} in the chest.`);
+        log(bot, `箱子里没有找到 ${itemName}。`);
         await chestContainer.close();
         return false;
     }
@@ -937,7 +937,7 @@ export async function takeFromChest(bot, itemName, num=-1) {
     }
     
     await chestContainer.close();
-    log(bot, `Successfully took ${totalTaken} ${itemName} from the chest.`);
+        log(bot, `成功从箱子中取出了 ${totalTaken} 个 ${itemName}。`);
     return totalTaken > 0;
 }
 
@@ -951,19 +951,19 @@ export async function viewChest(bot) {
      * **/
     let chest = world.getNearestBlock(bot, 'chest', 32);
     if (!chest) {
-        log(bot, `Could not find a chest nearby.`);
+        log(bot, `附近没有找到箱子。`);
         return false;
     }
     await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2);
     const chestContainer = await bot.openContainer(chest);
     let items = chestContainer.containerItems();
     if (items.length === 0) {
-        log(bot, `The chest is empty.`);
+        log(bot, `箱子是空的。`);
     }
     else {
-        log(bot, `The chest contains:`);
+        log(bot, `箱子内容：`);
         for (let item of items) {
-            log(bot, `${item.count} ${item.name}`);
+            log(bot, `${item.count} 个 ${item.name}`);
         }
     }
     await chestContainer.close();
@@ -985,12 +985,12 @@ export async function consume(bot, itemName="") {
         name = itemName;
     }
     if (!item) {
-        log(bot, `You do not have any ${name} to eat.`);
+        log(bot, `你没有 ${name} 可以吃。`);
         return false;
     }
     await bot.equip(item, 'hand');
     await bot.consume();
-    log(bot, `Consumed ${item.name}.`);
+        log(bot, `已食用 ${item.name}。`);
     return true;
 }
 
@@ -1007,7 +1007,7 @@ export async function giveToPlayer(bot, itemType, username, num=1) {
      * await skills.giveToPlayer(bot, "oak_log", "player1");
      **/
     if (bot.username === username) {
-        log(bot, `You cannot give items to yourself.`);
+        log(bot, `不能给自己物品。`);
         return false;
     }
     let player = bot.players[username].entity
@@ -1037,7 +1037,7 @@ export async function giveToPlayer(bot, itemType, username, num=1) {
             }
         }
         if (too_close) {
-            log(bot, `Failed to give ${itemType} to ${username}, too close.`);
+            log(bot, `给 ${username} ${itemType} 失败，距离太近。`);
             return false;
         }
     }
@@ -1048,7 +1048,7 @@ export async function giveToPlayer(bot, itemType, username, num=1) {
         bot.once('playerCollect', (collector, collected) => {
             console.log(collected.name);
             if (collector.username === username) {
-                log(bot, `${username} received ${itemType}.`);
+                log(bot, `${username} 收到了 ${itemType}。`);
                 given = true;
             }
         });
@@ -1063,7 +1063,7 @@ export async function giveToPlayer(bot, itemType, username, num=1) {
             }
         }
     }
-    log(bot, `Failed to give ${itemType} to ${username}, it was never received.`);
+        log(bot, `给 ${username} ${itemType} 失败，对方没有收到。`);
     return false;
 }
 
@@ -1089,13 +1089,13 @@ export async function goToGoal(bot, goal) {
     const pathfind_timeout = 1000;
     if (await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout).status === 'success') {
         final_movements = nonDestructiveMovements;
-        log(bot, `Found non-destructive path.`);
+        log(bot, `找到了非破坏性路径。`);
     }
     else if (await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout).status === 'success') {
-        log(bot, `Found destructive path.`);
+        log(bot, `找到了破坏性路径。`);
     }
     else {
-        log(bot, `Path not found, but attempting to navigate anyway using destructive movements.`);
+        log(bot, `未找到路径，但尝试使用破坏性移动继续导航。`);
     }
 
     const doorCheckInterval = startDoorInterval(bot);
@@ -1192,12 +1192,12 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
      * await skills.goToPosition(bot, position.x, position.y, position.x + 20);
      **/
     if (x == null || y == null || z == null) {
-        log(bot, `Missing coordinates, given x:${x} y:${y} z:${z}`);
+        log(bot, `缺少坐标，给定 x:${x} y:${y} z:${z}`);
         return false;
     }
     if (bot.modes.isOn('cheat')) {
         bot.chat('/tp @s ' + x + ' ' + y + ' ' + z);
-        log(bot, `Teleported to ${x}, ${y}, ${z}.`);
+        log(bot, `已传送至 ${x}, ${y}, ${z}。`);
         return true;
     }
     
@@ -1206,7 +1206,7 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
             const targetBlock = bot.targetDigBlock;
             const itemId = bot.heldItem ? bot.heldItem.type : null;
             if (!targetBlock.canHarvest(itemId)) {
-                log(bot, `Pathfinding stopped: Cannot break ${targetBlock.name} with current tools.`);
+                log(bot, `路径规划停止：当前工具无法破坏 ${targetBlock.name}。`);
                 bot.pathfinder.stop();
                 bot.stopDigging();
             }
@@ -1220,15 +1220,15 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
         clearInterval(progressInterval);
         const distance = bot.entity.position.distanceTo(new Vec3(x, y, z));
         if (distance <= min_distance+1) {
-            log(bot, `You have reached at ${x}, ${y}, ${z}.`);
+            log(bot, `已到达 ${x}, ${y}, ${z}。`);
             return true;
         }
         else {
-            log(bot, `Unable to reach ${x}, ${y}, ${z}, you are ${Math.round(distance)} blocks away.`);
+            log(bot, `无法到达 ${x}, ${y}, ${z}，你还有 ${Math.round(distance)} 格远。`);
             return false;
         }
     } catch (err) {
-        log(bot, `Pathfinding stopped: ${err.message}.`);
+        log(bot, `路径规划停止：${err.message}。`);
         clearInterval(progressInterval);
         return false;
     }
@@ -1247,14 +1247,14 @@ export async function goToNearestBlock(bot, blockType,  min_distance=2, range=64
      * **/
     const MAX_RANGE = 512;
     if (range > MAX_RANGE) {
-        log(bot, `Maximum search range capped at ${MAX_RANGE}. `);
+        log(bot, `最大搜索范围限制在 ${MAX_RANGE}。`);
         range = MAX_RANGE;
     }
     let block = null;
     if (blockType === 'water' || blockType === 'lava') {
         let blocks = world.getNearestBlocksWhere(bot, block => block.name === blockType && block.metadata === 0, range, 1);
         if (blocks.length === 0) {
-            log(bot, `Could not find any source ${blockType} in ${range} blocks, looking for uncollectable flowing instead...`);
+            log(bot, `在 ${range} 格内没有找到任何 ${blockType} 源方块，正在寻找不可收集的流动方块...`);
             blocks = world.getNearestBlocksWhere(bot, block => block.name === blockType, range, 1);
         }
         block = blocks[0];
@@ -1263,10 +1263,10 @@ export async function goToNearestBlock(bot, blockType,  min_distance=2, range=64
         block = world.getNearestBlock(bot, blockType, range);
     }
     if (!block) {
-        log(bot, `Could not find any ${blockType} in ${range} blocks.`);
+        log(bot, `在 ${range} 格内没有找到任何 ${blockType}。`);
         return false;
     }
-    log(bot, `Found ${blockType} at ${block.position}. Navigating...`);
+        log(bot, `在 ${block.position} 找到了 ${blockType}。正在导航...`);
     await goToPosition(bot, block.position.x, block.position.y, block.position.z, min_distance);
     return true;
 }
@@ -1282,11 +1282,11 @@ export async function goToNearestEntity(bot, entityType, min_distance=2, range=6
      **/
     let entity = world.getNearestEntityWhere(bot, entity => entity.name === entityType, range);
     if (!entity) {
-        log(bot, `Could not find any ${entityType} in ${range} blocks.`);
+        log(bot, `在 ${range} 格内没有找到任何 ${entityType}。`);
         return false;
     }
     let distance = bot.entity.position.distanceTo(entity.position);
-    log(bot, `Found ${entityType} ${distance} blocks away.`);
+        log(bot, `在 ${distance} 格外找到了 ${entityType}。`);
     await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z, min_distance);
     return true;
 }
@@ -1302,12 +1302,12 @@ export async function goToPlayer(bot, username, distance=3) {
      * await skills.goToPlayer(bot, "player");
      **/
     if (bot.username === username) {
-        log(bot, `You are already at ${username}.`);
+        log(bot, `你已经在 ${username} 身边了。`);
         return true;
     }
     if (bot.modes.isOn('cheat')) {
         bot.chat('/tp @s ' + username);
-        log(bot, `Teleported to ${username}.`);
+        log(bot, `已传送至 ${username}。`);
         return true;
     }
 
@@ -1324,7 +1324,7 @@ export async function goToPlayer(bot, username, distance=3) {
 
     await goToGoal(bot, goal, true);
 
-    log(bot, `You have reached ${username}.`);
+        log(bot, `已到达 ${username} 身边。`);
 }
 
 
@@ -1347,7 +1347,7 @@ export async function followPlayer(bot, username, distance=4) {
     let doorCheckInterval = startDoorInterval(bot);
 
     bot.pathfinder.setGoal(new pf.goals.GoalFollow(player, distance), true);
-    log(bot, `You are now actively following player ${username}.`);
+        log(bot, `你现在正在跟随玩家 ${username}。`);
 
 
     while (!bot.interrupt_code) {
@@ -1423,7 +1423,7 @@ export async function moveAway(bot, distance) {
 
     await goToGoal(bot, inverted_goal);
     let new_pos = bot.entity.position;
-    log(bot, `Moved away from ${pos.floored()} to ${new_pos.floored()}.`);
+        log(bot, `从 ${pos.floored()} 移动到了 ${new_pos.floored()}。`);
     return true;
 }
 
@@ -1468,7 +1468,7 @@ export async function avoidEnemies(bot, distance=16) {
         }
     }
     bot.pathfinder.stop();
-    log(bot, `Moved ${distance} away from enemies.`);
+        log(bot, `远离敌人 ${distance} 格。`);
     return true;
 }
 
@@ -1492,7 +1492,7 @@ export async function stay(bot, seconds=30) {
     while (!bot.interrupt_code && (seconds === -1 || Date.now() - start < seconds*1000)) {
         await new Promise(resolve => setTimeout(resolve, 500));
     }
-    log(bot, `Stayed for ${(Date.now() - start)/1000} seconds.`);
+        log(bot, `停留了 ${(Date.now() - start)/1000} 秒。`);
     return true;
 }
 
@@ -1516,7 +1516,7 @@ export async function useDoor(bot, door_pos=null) {
         door_pos = Vec3(door_pos.x, door_pos.y, door_pos.z);
     }
     if (!door_pos) {
-        log(bot, `Could not find a door to use.`);
+        log(bot, `附近没有找到门。`);
         return false;
     }
 
@@ -1536,7 +1536,7 @@ export async function useDoor(bot, door_pos=null) {
     bot.setControlState("forward", false);
     await bot.activateBlock(door_block);
 
-    log(bot, `Used door at ${door_pos}.`);
+        log(bot, `使用了 ${door_pos} 处的门。`);
     return true;
 }
 
@@ -1556,19 +1556,19 @@ export async function goToBed(bot) {
         count: 1
     });
     if (beds.length === 0) {
-        log(bot, `Could not find a bed to sleep in.`);
+        log(bot, `附近没有找到床可以睡觉。`);
         return false;
     }
     let loc = beds[0];
     await goToPosition(bot, loc.x, loc.y, loc.z);
     const bed = bot.blockAt(loc);
     await bot.sleep(bed);
-    log(bot, `You are in bed.`);
+        log(bot, `你上床了。`);
     bot.modes.pause('unstuck');
     while (bot.isSleeping) {
         await new Promise(resolve => setTimeout(resolve, 500));
     }
-    log(bot, `You have woken up.`);
+        log(bot, `你醒了。`);
     return true;
 }
 
@@ -1587,7 +1587,7 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
      **/
     let pos = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
     let block = bot.blockAt(pos);
-    log(bot, `Planting ${seedType} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
+        log(bot, `正在 x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)} 种植 ${seedType}。`);
 
     if (bot.modes.isOn('cheat')) {
         let to_remove = ['_seed', '_seeds'];
@@ -1602,18 +1602,18 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
     }
 
     if (block.name !== 'grass_block' && block.name !== 'dirt' && block.name !== 'farmland') {
-        log(bot, `Cannot till ${block.name}, must be grass_block or dirt.`);
+        log(bot, `无法耕 ${block.name}，必须是草方块或泥土。`);
         return false;
     }
     let above = bot.blockAt(new Vec3(x, y+1, z));
     if (above.name !== 'air') {
         if (block.name === 'farmland') {
-            log(bot, `Land is already farmed with ${above.name}.`);
+            log(bot, `土地已经被 ${above.name} 耕种过了。`);
             return true;
         }
         let broken = await breakBlockAt(bot, x, y+1, z);
         if (!broken) {
-            log(bot, `Cannot cannot break above block to till.`);
+            log(bot, `无法破坏上方方块来耕地。`);
             return false;
         }
     }
@@ -1627,11 +1627,11 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
         let hoe = bot.inventory.items().find(item => item.name.includes('hoe'));
         let to_equip = hoe?.name || 'diamond_hoe';
         if (!await equip(bot, to_equip)) {
-            log(bot, `Cannot till, no hoes.`);
+            log(bot, `没有锄头，无法耕地。`);
             return false;
         }
         await bot.activateBlock(block);
-        log(bot, `Tilled block x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
+        log(bot, `已耕 x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)} 处的土地。`);
     }
     
     if (seedType) {
@@ -1639,12 +1639,12 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
             seedType += 's'; // fixes common mistake
         let equipped_seeds = await equip(bot, seedType);
         if (!equipped_seeds) {
-            log(bot, `No ${seedType} to plant.`);
+            log(bot, `没有 ${seedType} 可以种植。`);
             return false;
         }
 
         await bot.activateBlock(block);
-        log(bot, `Planted ${seedType} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
+        log(bot, `在 x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)} 种植了 ${seedType}。`);
     }
     return true;
 }
@@ -1660,7 +1660,7 @@ export async function activateNearestBlock(bot, type) {
      * **/
     let block = world.getNearestBlock(bot, type, 16);
     if (!block) {
-        log(bot, `Could not find any ${type} to activate.`);
+        log(bot, `附近没有找到 ${type} 可以激活。`);
         return false;
     }
     if (bot.entity.position.distanceTo(block.position) > 4.5) {
@@ -1669,7 +1669,7 @@ export async function activateNearestBlock(bot, type) {
         await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
     }
     await bot.activateBlock(block);
-    log(bot, `Activated ${type} at x:${block.position.x.toFixed(1)}, y:${block.position.y.toFixed(1)}, z:${block.position.z.toFixed(1)}.`);
+        log(bot, `在 x:${block.position.x.toFixed(1)}, y:${block.position.y.toFixed(1)}, z:${block.position.z.toFixed(1)} 激活了 ${type}。`);
     return true;
 }
 
@@ -1684,7 +1684,7 @@ async function findAndGoToVillager(bot, id) {
     const entity = bot.entities[id];
     
     if (!entity) {
-        log(bot, `Cannot find villager with id ${id}`);
+        log(bot, `找不到 id 为 ${id} 的村民`);
         let entities = world.getNearbyEntities(bot, 16);
         let villager_list = "Available villagers:\n";
         for (let entity of entities) {
@@ -1698,7 +1698,7 @@ async function findAndGoToVillager(bot, id) {
             }
         }
         if (villager_list === "Available villagers:\n") {
-            log(bot, "No villagers found nearby.");
+            log(bot, "附近没有找到村民。");
             return null;
         }
         log(bot, villager_list);
@@ -1706,27 +1706,27 @@ async function findAndGoToVillager(bot, id) {
     }
     
     if (entity.entityType !== bot.registry.entitiesByName.villager.id) {
-        log(bot, 'Entity is not a villager');
+        log(bot, '该实体不是村民');
         return null;
     }
     
     if (entity.metadata && entity.metadata[16] === 1) {
-        log(bot, 'This is either a baby villager or a villager with no job - neither can trade');
+        log(bot, '这是幼年村民或没有职业的村民，两者都无法交易');
         return null;
     }
     
     const distance = bot.entity.position.distanceTo(entity.position);
     if (distance > 4) {
-        log(bot, `Villager is ${distance.toFixed(1)} blocks away, moving closer...`);
+        log(bot, `村民在 ${distance.toFixed(1)} 格外，正在靠近...`);
         try {
             bot.modes.pause('unstuck');
             const goal = new pf.goals.GoalFollow(entity, 2);
             await goToGoal(bot, goal);
             
             
-            log(bot, 'Successfully reached villager');
+            log(bot, '成功到达村民身边');
         } catch (err) {
-            log(bot, 'Failed to reach villager - pathfinding error or villager moved');
+            log(bot, '无法到达村民身边 - 寻路错误或村民移动了');
             console.log(err);
             return null;
         } finally {
@@ -1760,7 +1760,7 @@ export async function showVillagerTrades(bot, id) {
             return false;
         }
         
-        log(bot, `Villager has ${villager.trades.length} available trades:`);
+        log(bot, `村民有 ${villager.trades.length} 个可用交易：`);
         stringifyTrades(bot, villager.trades).forEach((trade, i) => {
             const tradeInfo = `${i + 1}: ${trade}`;
             console.log(tradeInfo);
@@ -1770,7 +1770,7 @@ export async function showVillagerTrades(bot, id) {
         villager.close();
         return true;
     } catch (err) {
-        log(bot, 'Failed to open villager trading interface - they might be sleeping, a baby, or jobless');
+        log(bot, '无法打开村民交易界面 - 可能在睡觉、是幼年村民或没有职业');
         console.log('Villager trading error:', err.message);
         return false;
     }
@@ -1805,51 +1805,51 @@ export async function tradeWithVillager(bot, id, index, count) {
         const trade = villager.trades[tradeIndex];
         
         if (!trade) {
-            log(bot, `Trade ${index} not found. This villager has ${villager.trades.length} trades available.`);
+            log(bot, `找不到交易 ${index}。这个村民有 ${villager.trades.length} 个可用交易。`);
             villager.close();
             return false;
         }
         
         if (trade.disabled) {
-            log(bot, `Trade ${index} is currently disabled`);
+            log(bot, `交易 ${index} 当前已禁用`);
             villager.close();
             return false;
         }
 
         const item_2 = trade.inputItem2 ? stringifyItem(bot, trade.inputItem2)+' ' : '';
-        log(bot, `Trading ${stringifyItem(bot, trade.inputItem1)} ${item_2}for ${stringifyItem(bot, trade.outputItem)}...`);
+        log(bot, `正在交易 ${stringifyItem(bot, trade.inputItem1)} ${item_2}换取 ${stringifyItem(bot, trade.outputItem)}...`);
         
         const maxPossibleTrades = trade.maximumNbTradeUses - trade.nbTradeUses;
         const requestedCount = count;
         const actualCount = Math.min(requestedCount, maxPossibleTrades);
         
         if (actualCount <= 0) {
-            log(bot, `Trade ${index} has been used to its maximum limit`);
+            log(bot, `交易 ${index} 已达到最大使用次数`);
             villager.close();
             return false;
         }
         
         if (!hasResources(villager.slots, trade, actualCount)) {
-            log(bot, `Don't have enough resources to execute trade ${index} ${actualCount} time(s)`);
+            log(bot, `没有足够的资源来执行交易 ${index} ${actualCount} 次`);
             villager.close();
             return false;
         }
         
-        log(bot, `Executing trade ${index} ${actualCount} time(s)...`);
+        log(bot, `正在执行交易 ${index} ${actualCount} 次...`);
         
         try {
             await bot.trade(villager, tradeIndex, actualCount);
-            log(bot, `Successfully traded ${actualCount} time(s)`);
+            log(bot, `成功交易了 ${actualCount} 次`);
             villager.close();
             return true;
         } catch (tradeErr) {
-            log(bot, 'An error occurred while trying to execute the trade');
+            log(bot, '执行交易时发生错误');
             console.log('Trade execution error:', tradeErr.message);
             villager.close();
             return false;
         }
     } catch (err) {
-        log(bot, 'Failed to open villager trading interface');
+        log(bot, '无法打开村民交易界面');
         console.log('Villager interface error:', err.message);
         return false;
     }
@@ -1919,14 +1919,14 @@ export async function digDown(bot, distance = 10) {
         let belowBlock = bot.blockAt(start_block_pos.offset(0, -i-1, 0));
 
         if (!targetBlock || !belowBlock) {
-            log(bot, `Dug down ${i-1} blocks, but reached the end of the world.`);
+            log(bot, `向下挖了 ${i-1} 格，但到达了世界尽头。`);
             return true;
         }
 
         // Check for lava, water
         if (targetBlock.name === 'lava' || targetBlock.name === 'water' || 
             belowBlock.name === 'lava' || belowBlock.name === 'water') {
-            log(bot, `Dug down ${i-1} blocks, but reached ${belowBlock ? belowBlock.name : '(lava/water)'}`)
+            log(bot, `向下挖了 ${i-1} 格，但遇到了 ${belowBlock ? belowBlock.name : '(熔岩/水)'}`)
             return false;
         }
 
@@ -1940,23 +1940,23 @@ export async function digDown(bot, distance = 10) {
             belowBlock = bot.blockAt(belowBlock.position.offset(0, -1, 0));
         }
         if (num_fall_blocks > MAX_FALL_BLOCKS) {
-            log(bot, `Dug down ${i-1} blocks, but reached a drop below the next block.`);
+            log(bot, `向下挖了 ${i-1} 格，但下方是空的。`);
             return false;
         }
 
         if (targetBlock.name === 'air' || targetBlock.name === 'cave_air') {
-            log(bot, 'Skipping air block');
+            log(bot, '跳过空气方块');
             console.log(targetBlock.position);
             continue;
         }
 
         let dug = await breakBlockAt(bot, targetBlock.position.x, targetBlock.position.y, targetBlock.position.z);
         if (!dug) {
-            log(bot, 'Failed to dig block at position:' + targetBlock.position);
+            log(bot, '无法挖掘位置处的方块:' + targetBlock.position);
             return false;
         }
     }
-    log(bot, `Dug down ${distance} blocks.`);
+        log(bot, `向下挖了 ${distance} 格。`);
     return true;
 }
 
@@ -1973,7 +1973,7 @@ export async function goToSurface(bot) {
             continue;
         }
         await goToPosition(bot, block.position.x, block.position.y + 1, block.position.z, 0); // this will probably work most of the time but a custom mining and towering up implementation could be added if needed
-        log(bot, `Going to the surface at y=${y+1}.`);``
+        log(bot, `正在前往 y=${y+1} 的地表。`);
         return true;
     }
     return false;
@@ -1988,7 +1988,7 @@ export async function useToolOn(bot, toolName, targetName) {
      * @returns {Promise<boolean>} true if action succeeded
      */
     if (!bot.inventory.slots.find(slot => slot && slot.name === toolName) && !bot.game.gameMode === 'creative') {
-        log(bot, `You do not have any ${toolName} to use.`);
+        log(bot, `你没有 ${toolName} 可以使用。`);
         return false;
     }
 
@@ -1999,11 +1999,11 @@ export async function useToolOn(bot, toolName, targetName) {
             return false;
         }
         await bot.activateItem();
-        log(bot, `Used ${toolName}.`);
+        log(bot, `使用了 ${toolName}。`);
     } else if (world.isEntityType(targetName)) {
         const entity = world.getNearestEntityWhere(bot, e => e.name === targetName, 64);
         if (!entity) {
-            log(bot, `Could not find any ${targetName}.`);
+            log(bot, `附近没有找到 ${targetName}。`);
             return false;
         }
         await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z);
@@ -2015,7 +2015,7 @@ export async function useToolOn(bot, toolName, targetName) {
             if (!equipped) return false;
         }
         await bot.useOn(entity);
-        log(bot, `Used ${toolName} on ${targetName}.`);
+        log(bot, `对 ${targetName} 使用了 ${toolName}。`);
     } else {
         let block = null;
         if (targetName === 'water' || targetName === 'lava') {
@@ -2023,7 +2023,7 @@ export async function useToolOn(bot, toolName, targetName) {
             // so search for blocks with metadata 0 (not flowing)
             let blocks = world.getNearestBlocksWhere(bot, block => block.name === targetName && block.metadata === 0, 64, 1);
             if (blocks.length === 0) {
-                log(bot, `Could not find any source ${targetName}.`);
+                log(bot, `附近没有找到 ${targetName} 源。`);
                 return false;
             }
             block = blocks[0];
@@ -2032,7 +2032,7 @@ export async function useToolOn(bot, toolName, targetName) {
             block = world.getNearestBlock(bot, targetName, 64);
         }
         if (!block) {
-            log(bot, `Could not find any ${targetName}.`);
+            log(bot, `附近没有找到 ${targetName}。`);
             return false;
         }
         return await useToolOnBlock(bot, toolName, block);
@@ -2064,14 +2064,14 @@ export async function useToolOn(bot, toolName, targetName) {
     }
     const blockInView = bot.blockAtCursor(5);
     if (viewBlocked()) {
-        log(bot, `Block ${blockInView.name} is in the way, moving closer...`);
+        log(bot, `方块 ${blockInView.name} 挡住了路，正在靠近...`);
         // choose random block next to target block, go to it
         const nearbyPos = block.position.offset(Math.random() * 2 - 1, 0, Math.random() * 2 - 1);
         await goToPosition(bot, nearbyPos.x, nearbyPos.y, nearbyPos.z, 1);
         await bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
         if (viewBlocked()) {
             const blockInView = bot.blockAtCursor(5);
-            log(bot, `Block ${blockInView.name} is in the way, not using ${toolName}.`);
+            log(bot, `方块 ${blockInView.name} 挡住了路，不使用 ${toolName}。`);
             return false;
         }
     }
@@ -2079,7 +2079,7 @@ export async function useToolOn(bot, toolName, targetName) {
     const equipped = await equip(bot, toolName);
 
     if (!equipped) {
-        log(bot, `Could not equip ${toolName}.`);
+        log(bot, `无法装备 ${toolName}。`);
         return false;
     }
     if (toolName.includes('bucket')) {
@@ -2088,6 +2088,6 @@ export async function useToolOn(bot, toolName, targetName) {
     else {
         await bot.activateBlock(block);
     }
-    log(bot, `Used ${toolName} on ${block.name}.`);
+        log(bot, `对 ${block.name} 使用了 ${toolName}。`);
     return true;
  }

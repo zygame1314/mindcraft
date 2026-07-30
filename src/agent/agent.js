@@ -214,7 +214,7 @@ export class Agent {
             await this.handleMessage('system', init_message, 2);
         }
         else {
-            this.openChat("Hello world! I am "+this.name);
+            this.openChat("你好世界！我是 "+this.name);
         }
     }
 
@@ -482,7 +482,7 @@ export class Agent {
                     death_pos_text = `x: ${death_pos.x.toFixed(2)}, y: ${death_pos.y.toFixed(2)}, z: ${death_pos.z.toFixed(2)}`;
                 }
                 let dimention = this.bot.game.dimension;
-                this.handleMessage('system', `You died at position ${death_pos_text || "unknown"} in the ${dimention} dimension with the final message: '${message}'. Your place of death is saved as 'last_death_position' if you want to return. Previous actions were stopped and you have respawned.`);
+                this.handleMessage('system', `你在 ${dimention} 维度的位置 ${death_pos_text || "未知"} 死亡，死亡消息：'${message}'。你的死亡位置已保存为 'last_death_position'，如需返回可使用。之前的操作已停止，你已重生。`);
             }
         });
         this.bot.on('idle', () => {

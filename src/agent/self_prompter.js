@@ -63,13 +63,13 @@ export class SelfPrompter {
         let no_command_count = 0;
         const MAX_NO_COMMAND = 3;
         while (!this.interrupt) {
-            const msg = `You are self-prompting with the goal: '${this.prompt}'. Your next response MUST contain a command with this syntax: !commandName. Respond:`;
+            const msg = `你正在自我提示，目标为：'${this.prompt}'。你的下一条回复必须包含一个指令，格式为：!commandName。回复：`;
             
             let used_command = await this.agent.handleMessage('system', msg, -1);
             if (!used_command) {
                 no_command_count++;
                 if (no_command_count >= MAX_NO_COMMAND) {
-                    let out = `Agent did not use command in the last ${MAX_NO_COMMAND} auto-prompts. Stopping auto-prompting.`;
+                    let out = `代理在最近 ${MAX_NO_COMMAND} 次自动提示中未使用指令。停止自动提示。`;
                     this.agent.openChat(out);
                     console.warn(out);
                     this.state = STOPPED;
