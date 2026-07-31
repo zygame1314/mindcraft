@@ -27,7 +27,28 @@ async function equipHighestAttack(bot) {
         weapons = bot.inventory.items().filter(item => item.name.includes('pickaxe') || item.name.includes('shovel'));
     if (weapons.length === 0)
         return;
-    weapons.sort((a, b) => b.attackDamage - a.attackDamage);
+    // 攻速表（取自 mineflayer-pvp 的 AttackSpeeds.json）
+    const attackSpeeds = {
+        wooden_sword: 1.6, golden_sword: 1.6, stone_sword: 1.6, iron_sword: 1.6,
+        diamond_sword: 1.6, netherite_sword: 1.6, trident: 1.1,
+        wooden_shovel: 1.0, golden_shovel: 1.0, stone_shovel: 1.0, iron_shovel: 1.0,
+        diamond_shovel: 1.0, netherite_shovel: 1.0,
+        wooden_pickaxe: 1.2, golden_pickaxe: 1.2, stone_pickaxe: 1.2, iron_pickaxe: 1.2,
+        diamond_pickaxe: 1.2, netherite_pickaxe: 1.2,
+        wooden_axe: 0.8, golden_axe: 1.0, stone_axe: 0.8, iron_axe: 0.9,
+        diamond_axe: 1.0, netherite_axe: 1.0,
+        other: 4.0
+    };
+    const getSpeed = name => attackSpeeds[name] ?? attackSpeeds.other;
+    // 按 DPS（单次伤害 × 攻速）排序；同 DPS 时优先剑（攻速快、不浪费工具耐久）
+    weapons.sort((a, b) => {
+        const dpsA = (a.attackDamage ?? 1) * getSpeed(a.name);
+        const dpsB = (b.attackDamage ?? 1) * getSpeed(b.name);
+        if (Math.abs(dpsB - dpsA) > 0.01) return dpsB - dpsA;
+        const aSword = a.name.includes('sword') ? 1 : 0;
+        const bSword = b.name.includes('sword') ? 1 : 0;
+        return bSword - aSword;
+    });
     let weapon = weapons[0];
     if (weapon)
         await bot.equip(weapon, 'hand');
@@ -988,6 +1009,13 @@ export async function consume(bot, itemName="") {
         log(bot, `你没有 ${name} 可以吃。`);
         return false;
     }
+    // auto-eat 插件会把食物留在副手，导致 consume 失败；先清空副手再装备到主手
+    try {
+        const offHand = bot.inventory.slots[bot.inventory.getEquipmentSlot('off-hand')];
+        if (offHand && offHand.name === item.name) {
+            await bot.unequip('off-hand');
+        }
+    } catch (_) {}
     await bot.equip(item, 'hand');
     await bot.consume();
         log(bot, `已食用 ${item.name}。`);
@@ -1010,39 +1038,159 @@ export async function fish(bot, timeoutMs=60000) {
         log(bot, "背包里没有鱼竿，没法钓鱼。");
         return false;
     }
+
+    // 扫描附近所有水方块，找一个最佳钓鱼点：
+    // 站在岸上（脚下是固体方块），到水面之间视线无遮挡
+    let waterBlocks = world.getNearestBlocks(bot, 'water', 32, 200);
+    if (!waterBlocks || waterBlocks.length === 0) {
+        log(bot, "附近 32 格内没有水源，没法钓鱼。");
+        return false;
+    }
+
+    // 检查从岸边看向水面，中间是否有固体方块遮挡视线
+    function lineOfSightClear(fromX, fromY, fromZ, toX, toY, toZ) {
+        let steps = Math.ceil(Math.max(Math.abs(toX-fromX), Math.abs(toZ-fromZ)));
+        for (let i = 1; i < steps; i++) {
+            let t = i / steps;
+            let bx = Math.floor(fromX + (toX-fromX)*t);
+            let by = Math.floor(fromY + (toY-fromY)*t + 1); // 视线高度（眼睛在脚下+1）
+            let bz = Math.floor(fromZ + (toZ-fromZ)*t);
+            let b = bot.blockAt(new Vec3(bx, by, bz));
+            if (b && b.name !== 'air' && b.name !== 'water') return false;
+        }
+        return true;
+    }
+
+    let bestSpot = null;
+    let bestScore = -1;
+    for (let w of waterBlocks) {
+        // 水方块四个水平方向找岸，同层和上层都查（圆石可能比水面高）
+        for (let [dx, dz] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+            for (let dy of [0, 1]) {
+                let shoreX = w.position.x + dx;
+                let shoreBlockY = w.position.y + dy;
+                let shoreZ = w.position.z + dz;
+                let shoreBlock = bot.blockAt(new Vec3(shoreX, shoreBlockY, shoreZ));
+                let shoreAbove = bot.blockAt(new Vec3(shoreX, shoreBlockY + 1, shoreZ));
+                // 岸必须是固体，上方是空气（能站）
+                if (!shoreBlock || !shoreAbove) continue;
+                if (shoreBlock.name === 'water' || shoreBlock.name === 'air') continue;
+                if (shoreAbove.name !== 'air') continue;
+                // 站位 = 岸方块顶（脚踩在方块上面）
+                let standY = shoreBlockY + 1;
+                // 检查从站位到水面之间视线是否被遮挡
+                if (!lineOfSightClear(shoreX, standY, shoreZ, w.position.x, w.position.y, w.position.z)) continue;
+                // 评分：离当前位置越近越好
+                let dist = Math.sqrt((shoreX - bot.entity.position.x)**2 + (shoreZ - bot.entity.position.z)**2);
+                let score = 100 - dist;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestSpot = { shoreX, shoreY: standY, shoreZ, water: w, dx, dz };
+                }
+            }
+        }
+    }
+
+    if (!bestSpot) {
+        log(bot, "找到了水但周围没有合适的岸可以站，没法钓鱼。");
+        return false;
+    }
+
+    log(bot, `找到最佳钓鱼点：站在 (${bestSpot.shoreX}, ${bestSpot.shoreY}, ${bestSpot.shoreZ})，面向水面 (${bestSpot.water.position.x}, ${bestSpot.water.position.y}, ${bestSpot.water.position.z})。`);
+    await goToPosition(bot, bestSpot.shoreX, bestSpot.shoreY, bestSpot.shoreZ, 0);
+    // 如果没站上去（高度不够），手动跳上去
+    if (bot.entity.position.y < bestSpot.shoreY - 0.5) {
+        log(bot, "岸有点高，跳上去。");
+        bot.setControlState('forward', true);
+        bot.setControlState('jump', true);
+        await wait(bot, 1000);
+        bot.clearControlStates();
+        await wait(bot, 500);
+    }
     await bot.equip(rod, 'hand');
-    log(bot, "已装备鱼竿，准备抛竿。");
+    await wait(bot, 500);
+
+    // 朝水塘内部远处看（往水的反方向延伸），抛得更远；平视水面高度，加点随机偏移避免每次落点一样
+    let farWaterX = bestSpot.water.position.x - bestSpot.dx * 5;
+    let farWaterZ = bestSpot.water.position.z - bestSpot.dz * 5;
+    let waterTarget = new Vec3(farWaterX, bestSpot.water.position.y, farWaterZ);
+    function aimAtWater() {
+        let randX = (Math.random() - 0.5) * 3;
+        let randZ = (Math.random() - 0.5) * 3;
+        bot.lookAt(waterTarget.offset(randX, 0, randZ));
+    }
+    await aimAtWater();
     await wait(bot, 300);
 
-    bot.activateItem();
-    log(bot, "已抛竿，等待浮标落水...");
-    await wait(bot, 2500);
-
-    let baseY = null;
+    const MAX_CASTS = 5;
     let caught = false;
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+    for (let cast = 0; cast < MAX_CASTS; cast++) {
+        // 确保没站在水里；掉了水就停止本轮钓鱼，提示由 AI 主动用 !goToShore 上岸
+        let feetBlock = bot.blockAt(bot.entity.position);
+        if (feetBlock && feetBlock.name === 'water') {
+            log(bot, "哎呀掉水里了！请用 !goToShore 让我爬回岸上。");
+            return false;
+        }
+
+        bot.activateItem();
+        log(bot, `第 ${cast + 1} 次抛竿，等待浮标落水...`);
+        await wait(bot, 2500);
+
+        // 找浮标，验证是否真在水里
         let bobber = null;
         for (const id in bot.entities) {
             const e = bot.entities[id];
             if (e.name === 'fishing_bobber' || e.name === 'bobber') { bobber = e; break; }
         }
-        if (bobber && bobber.position) {
-            if (baseY === null) {
-                baseY = bobber.position.y;
-                log(bot, `浮标落水，基准高度 y=${baseY.toFixed(2)}。`);
-            } else if (bobber.position.y < baseY - 0.4) {
+        if (!bobber || !bobber.position) {
+            log(bot, "没找到浮标，收竿重试。");
+            bot.activateItem();
+            await wait(bot, 1500);
+            await aimAtWater();
+            continue;
+        }
+        // 检查浮标下方是不是水
+        let bobberBlock = bot.blockAt(bobber.position);
+        let bobberBelow = bot.blockAt(bobber.position.offset(0, -0.5, 0));
+        let inWater = (bobberBlock && bobberBlock.name === 'water') || (bobberBelow && bobberBelow.name === 'water');
+        if (!inWater) {
+            log(bot, `浮标落在陆地上 (${bobber.position.x}, ${bobber.position.y}, ${bobber.position.z})，换角度重试。`);
+            bot.activateItem();
+            await wait(bot, 1500);
+            // 重新瞄准远处水面，带随机偏移
+            await aimAtWater();
+            continue;
+        }
+
+        log(bot, `浮标落水了，基准高度 y=${bobber.position.y.toFixed(2)}，等鱼上钩。`);
+        let baseY = bobber.position.y;
+        const castDeadline = Date.now() + timeoutMs;
+        while (Date.now() < castDeadline) {
+            // 重新获取浮标
+            let cur = null;
+            for (const id in bot.entities) {
+                const e = bot.entities[id];
+                if (e.name === 'fishing_bobber' || e.name === 'bobber') { cur = e; break; }
+            }
+            if (cur && cur.position && cur.position.y < baseY - 0.4) {
                 caught = true;
                 log(bot, "浮标下沉！鱼上钩啦！");
                 break;
             }
+            // 浮标消失了（被收走/超时），跳出内层循环重抛
+            if (!cur) {
+                log(bot, "浮标消失了，重新抛竿。");
+                break;
+            }
+            await wait(bot, 200);
         }
-        await wait(bot, 200);
+        bot.activateItem();
+        await wait(bot, 2000);
+        if (caught) break;
     }
 
-    bot.activateItem();
-    log(bot, caught ? "收竿，有鱼上钩！" : "超时收竿，没钓到。");
-    await wait(bot, 2000);
+    log(bot, caught ? "收竿，有鱼上钩！" : `试了 ${MAX_CASTS} 次都没钓到。`);
+    await wait(bot, 1000);
 
     const fishNames = ['cod', 'salmon', 'pufferfish', 'tropical_fish'];
     let fishItem = bot.inventory.items().find(it => fishNames.includes(it.name));
@@ -1055,76 +1203,200 @@ export async function fish(bot, timeoutMs=60000) {
 }
 
 
-export async function giveToPlayer(bot, itemType, username, num=1) {
+export async function goToShore(bot) {
     /**
-     * Give one of the specified item to the specified player
+     * Find the nearest shore (a solid, standable block adjacent to water) and navigate onto it.
+     * If the bot is currently in water it will climb out toward the closest shore; otherwise it
+     * walks to the nearest shore spot. Intended to be triggered manually by the agent.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {string} itemType, the name of the item to give.
-     * @param {string} username, the username of the player to give the item to.
-     * @param {number} num, the number of items to give. Defaults to 1.
-     * @returns {Promise<boolean>} true if the item was given, false otherwise.
+     * @returns {Promise<boolean>} true if the bot reached a shore spot, false otherwise.
      * @example
-     * await skills.giveToPlayer(bot, "oak_log", "player1");
+     * await skills.goToShore(bot);
      **/
+    let feetBlock = bot.blockAt(bot.entity.position);
+    let inWater = feetBlock && feetBlock.name === 'water';
+
+    let waterBlocks = world.getNearestBlocks(bot, 'water', 32, 200);
+    if (!waterBlocks || waterBlocks.length === 0) {
+        log(bot, "附近 32 格内没有水源，找不到岸。");
+        return false;
+    }
+
+    let bestSpot = null;
+    let bestScore = -1;
+    for (let w of waterBlocks) {
+        for (let [dx, dz] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+            for (let dy of [0, 1]) {
+                let shoreX = w.position.x + dx;
+                let shoreBlockY = w.position.y + dy;
+                let shoreZ = w.position.z + dz;
+                let shoreBlock = bot.blockAt(new Vec3(shoreX, shoreBlockY, shoreZ));
+                let shoreAbove = bot.blockAt(new Vec3(shoreX, shoreBlockY + 1, shoreZ));
+                if (!shoreBlock || !shoreAbove) continue;
+                if (shoreBlock.name === 'water' || shoreBlock.name === 'air') continue;
+                if (shoreAbove.name !== 'air') continue;
+                let standY = shoreBlockY + 1;
+                let dist = Math.sqrt((shoreX - bot.entity.position.x)**2 + (shoreZ - bot.entity.position.z)**2);
+                let score = 100 - dist;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestSpot = { shoreX, shoreY: standY, shoreZ };
+                }
+            }
+        }
+    }
+
+    if (!bestSpot) {
+        log(bot, "找到了水但周围没有合适的岸可以站。");
+        return false;
+    }
+
+    log(bot, `最近的岸在 (${bestSpot.shoreX}, ${bestSpot.shoreY}, ${bestSpot.shoreZ})，正在上岸。`);
+
+    if (inWater) {
+        // 沿当前→岸方向单位向量，用于探测前方/上方阻挡方块
+        let climbDx = bestSpot.shoreX - bot.entity.position.x;
+        let climbDz = bestSpot.shoreZ - bot.entity.position.z;
+        let len = Math.hypot(climbDx, climbDz) || 1;
+        let fx = Math.round(climbDx / len);
+        let fz = Math.round(climbDz / len);
+        let yaw = Math.atan2(-climbDx, -climbDz);
+        await bot.look(yaw, 0, false);
+
+        // 窒息探测：挖掉头顶及前方阻挡上岸的固体方块，防止被淹死
+        async function clearObstacles() {
+            const pos = bot.entity.position;
+            const head = bot.blockAt(pos.offset(0, 1, 0));
+            if (head && head.name !== 'air' && head.name !== 'water') {
+                try { await bot.tool.equipForBlock(head); } catch (_) {}
+                try { await bot.dig(head, true); log(bot, `挖掉头顶的 ${head.name} 以便呼吸。`); } catch (e) {}
+            }
+            // 前方一格（同层和上一层）的阻挡方块
+            for (let dy of [0, 1]) {
+                let b = bot.blockAt(pos.offset(fx, dy, fz));
+                if (b && b.name !== 'air' && b.name !== 'water') {
+                    try { await bot.tool.equipForBlock(b); } catch (_) {}
+                    try { await bot.dig(b, true); log(bot, `挖掉前方 ${b.name} 清出上岸通道。`); } catch (e) {}
+                }
+            }
+        }
+
+        for (let attempt = 0; attempt < 5; attempt++) {
+            await clearObstacles();
+            bot.setControlState('forward', true);
+            bot.setControlState('jump', true);
+            bot.setControlState('sprint', true);
+            await wait(bot, 1500);
+            bot.clearControlStates();
+            await wait(bot, 400);
+            let now = bot.blockAt(bot.entity.position);
+            if (!now || now.name !== 'water') break;
+            // 重新计算朝向（可能位置已变）
+            let ndx = bestSpot.shoreX - bot.entity.position.x;
+            let ndz = bestSpot.shoreZ - bot.entity.position.z;
+            if (Math.hypot(ndx, ndz) > 0.1) {
+                await bot.look(Math.atan2(-ndx, -ndz), 0, false);
+                len = Math.hypot(ndx, ndz) || 1;
+                fx = Math.round(ndx / len);
+                fz = Math.round(ndz / len);
+            }
+        }
+        let now = bot.blockAt(bot.entity.position);
+        if (now && now.name === 'water') {
+            log(bot, "爬了一会儿还在水里，尝试路径规划到岸边。");
+            try { await goToPosition(bot, bestSpot.shoreX, bestSpot.shoreY, bestSpot.shoreZ, 0); } catch (_) {}
+        }
+    } else {
+        try { await goToPosition(bot, bestSpot.shoreX, bestSpot.shoreY, bestSpot.shoreZ, 0); } catch (_) {}
+        if (bot.entity.position.y < bestSpot.shoreY - 0.5) {
+            bot.setControlState('forward', true);
+            bot.setControlState('jump', true);
+            await wait(bot, 1000);
+            bot.clearControlStates();
+            await wait(bot, 500);
+        }
+    }
+
+    let final = bot.blockAt(bot.entity.position);
+    if (final && final.name === 'water') {
+        log(bot, "上岸失败，还在水里。");
+        return false;
+    }
+    log(bot, "成功上岸！");
+    return true;
+}
+
+
+export async function giveToPlayer(bot, itemType, username, num=1) {
     if (bot.username === username) {
         log(bot, `不能给自己物品。`);
         return false;
     }
-    let player = bot.players[username].entity
+
+    let player = bot.players[username]?.entity;
     if (!player) {
-        log(bot, `Could not find ${username}.`);
+        log(bot, `找不到玩家 ${username}。`);
         return false;
     }
+
     await goToPlayer(bot, username, 3);
-    // if we are 2 below the player
-    log(bot, bot.entity.position.y, player.position.y);
+
+    // 高度差纠正
     if (bot.entity.position.y < player.position.y - 1) {
         await goToPlayer(bot, username, 1);
     }
-    // if we are too close, make some distance
-    if (bot.entity.position.distanceTo(player.position) < 2) {
-        let too_close = true;
-        let start_moving_away = Date.now();
-        await moveAwayFromEntity(bot, player, 2);
-        while (too_close && !bot.interrupt_code) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            too_close = bot.entity.position.distanceTo(player.position) < 5;
-            if (too_close) {
-                await moveAwayFromEntity(bot, player, 5);
-            }
-            if (Date.now() - start_moving_away > 3000) {
-                break;
-            }
-        }
-        if (too_close) {
-            log(bot, `给 ${username} ${itemType} 失败，距离太近。`);
-            return false;
-        }
-    }
 
-    await bot.lookAt(player.position);
-    if (await discard(bot, itemType, num)) {
+    // 暂停自动拾取，防止扔出后立刻被自己吸回背包
+    const itemCollectWasOn = bot.modes.isOn('item_collecting');
+    if (itemCollectWasOn) bot.modes.pause('item_collecting');
+
+    let success = false;
+
+    let collectHandler = null;
+
+    try {
+        // 朝玩家胸口/头部看，丢出的抛物线更自然，而不是往玩家脚丢
+        await bot.lookAt(player.position.offset(0, 1.2, 0));
+
         let given = false;
-        bot.once('playerCollect', (collector, collected) => {
-            console.log(collected.name);
+        collectHandler = (collector, collected) => {
             if (collector.username === username) {
                 log(bot, `${username} 收到了 ${itemType}。`);
                 given = true;
             }
-        });
-        let start = Date.now();
-        while (!given && !bot.interrupt_code) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            if (given) {
-                return true;
-            }
-            if (Date.now() - start > 3000) {
-                break;
+        };
+        // 用 bot.on 持续监听，防止被别的拾取事件误消耗
+        bot.on('playerCollect', collectHandler);
+
+        if (await discard(bot, itemType, num)) {
+            let start = Date.now();
+            // 稍加长到 5000ms，防止网络稍有延迟误判失败
+            while (!given && !bot.interrupt_code) {
+                await new Promise(resolve => setTimeout(resolve, 300));
+                if (given) {
+                    success = true;
+                    break;
+                }
+                if (Date.now() - start > 5000) {
+                    break;
+                }
             }
         }
+
+        if (!success) {
+            log(bot, `给 ${username} ${itemType} 失败，对方未收到或超时。`);
+        }
+    } finally {
+        if (collectHandler) {
+            bot.removeListener('playerCollect', collectHandler);
+        }
+        // 恢复自动拾取模式
+        if (itemCollectWasOn) {
+            try { bot.modes.unpause('item_collecting'); } catch (_) {}
+        }
     }
-        log(bot, `给 ${username} ${itemType} 失败，对方没有收到。`);
-    return false;
+
+    return success;
 }
 
 export async function goToGoal(bot, goal) {
@@ -1185,7 +1457,47 @@ function startDoorInterval(bot) {
     let prev_pos = bot.entity.position.clone();
     let prev_check = Date.now();
     let stuck_time = 0;
+    let isResolving = false;
 
+    async function digObstacle(bot) {
+        const pos = bot.entity.position;
+        const yaw = bot.entity.yaw;
+        const fx = Math.round(-Math.sin(yaw));
+        const fz = Math.round(Math.cos(yaw));
+        const passable = ['air', 'cave_air', 'water', 'lava', 'bedrock'];
+        const dirs = [
+            [fx, 0, fz], [fx, 1, fz], [fx, 2, fz],
+            [0, 1, 0], [0, 2, 0],
+            [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1],
+        ];
+        // 收集候选阻挡方块
+        let candidates = [];
+        for (const [dx, dy, dz] of dirs) {
+            const block = bot.blockAt(pos.offset(dx, dy, dz));
+            if (!block || passable.includes(block.name)) continue;
+            candidates.push(block);
+        }
+        // 智能排序：优先当前工具能挖且最软的，挖不动的排后面
+        const hardnessOf = b => (typeof b.hardness === 'number' && b.hardness >= 0) ? b.hardness : 99;
+        candidates.sort((a, b) => {
+            const itemId = bot.heldItem ? bot.heldItem.type : null;
+            const aCan = a.canHarvest(itemId);
+            const bCan = b.canHarvest(itemId);
+            if (aCan !== bCan) return aCan ? -1 : 1;
+            return hardnessOf(a) - hardnessOf(b);
+        });
+        for (const block of candidates) {
+            try {
+                await bot.tool.equipForBlock(block);
+                const itemId = bot.heldItem ? bot.heldItem.type : null;
+                if (!block.canHarvest(itemId)) continue; // 换了工具还是挖不动，跳过
+                await bot.dig(block, true);
+                log(bot, `挖掉卡路的 ${block.name} 以脱困。`);
+                return true;
+            } catch (_) {}
+        }
+        return false;
+    }
 
     const doorCheckInterval = setInterval(() => {
         const now = Date.now();
@@ -1195,7 +1507,9 @@ function startDoorInterval(bot) {
             stuck_time += now - prev_check;
         }
         
-        if (stuck_time > 1200) {
+        if (stuck_time > 1200 && !isResolving) {
+            isResolving = true;
+            stuck_time = 0;
             // shuffle positions so we're not always opening the same door
             const positions = [
                 bot.entity.position.clone(),
@@ -1217,6 +1531,7 @@ function startDoorInterval(bot) {
                 positions[randomIndex], positions[currentIndex]];
             }
             
+            let openedDoor = false;
             for (let position of positions) {
                 let block = bot.blockAt(position);
                 if (block && block.name &&
@@ -1226,10 +1541,16 @@ function startDoorInterval(bot) {
                      block.name.includes('trapdoor'))) 
                 {
                     bot.activateBlock(block);
+                    openedDoor = true;
                     break;
                 }
             }
-            stuck_time = 0;
+            // 没有门可开就挖掉前方/头顶阻挡的方块（狭窄洞穴卡住）
+            if (!openedDoor) {
+                digObstacle(bot).finally(() => { isResolving = false; });
+            } else {
+                isResolving = false;
+            }
         }
         prev_pos = bot.entity.position.clone();
         prev_check = now;

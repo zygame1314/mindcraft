@@ -119,12 +119,79 @@ const modes_list = [
                 this.prev_dig_block = null;
             }
             const max_stuck_time = cur_dig_block?.name === 'obsidian' ? this.max_stuck_time * 2 : this.max_stuck_time;
-            if (this.stuck_time > max_stuck_time) {
+            // 脚下/身处在藤蔓类方块上时，更快判定为卡住（红树林沼泽常见）
+            const vineNames = ['vine', 'weeping_vines', 'weeping_vines_plant', 'twisting_vines', 'twisting_vines_plant', 'cave_vines', 'cave_vines_plant'];
+            const feetBlock = bot.blockAt(bot.entity.position);
+            const inVine = feetBlock && vineNames.includes(feetBlock.name);
+            const effectiveMax = inVine ? Math.min(max_stuck_time, 8) : max_stuck_time;
+            if (this.stuck_time > effectiveMax) {
                 say(agent, '我卡住啦！');
                 this.stuck_time = 0;
                 execute(this, agent, async () => {
                     const crashTimeout = setTimeout(() => { agent.cleanKill("卡住了且无法脱困") }, 10000);
-                    await skills.moveAway(bot, 5);
+                    const bot = agent.bot;
+                    const pos = bot.entity.position;
+                    const yaw = bot.entity.yaw;
+                    const fx = Math.round(-Math.sin(yaw));
+                    const fz = Math.round(Math.cos(yaw));
+                    const passable = ['air', 'cave_air', 'water', 'lava', 'bedrock'];
+                    const vineNames = ['vine', 'weeping_vines', 'weeping_vines_plant', 'twisting_vines', 'twisting_vines_plant', 'cave_vines', 'cave_vines_plant'];
+
+                    // 收集周围阻挡方块：前方/侧方/上方/脚下，挖掉能脱困的
+                    let candidates = [];
+                    const dirs = [
+                        [fx, 0, fz], [fx, 1, fz], [fx, 2, fz],   // 前方同层、上方、头顶
+                        [0, 1, 0], [0, 2, 0],                     // 头顶
+                        [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], // 侧方
+                        [0, -1, 0],                               // 脚下
+                    ];
+                    for (const [dx, dy, dz] of dirs) {
+                        const b = bot.blockAt(pos.offset(dx, dy, dz));
+                        if (!b || passable.includes(b.name)) continue;
+                        candidates.push(b);
+                    }
+                    // 藤蔓也加入候选（无碰撞但会缠住）
+                    for (let dx of [-1, 0, 1]) {
+                        for (let dy of [-1, 0, 1, 2]) {
+                            for (let dz of [-1, 0, 1]) {
+                                const b = bot.blockAt(pos.offset(dx, dy, dz));
+                                if (b && vineNames.includes(b.name)) candidates.push(b);
+                            }
+                        }
+                    }
+
+                    // 智能排序：优先挖当前工具能采集且最软的；挖不动的排最后
+                    const hardnessOf = b => (typeof b.hardness === 'number' && b.hardness >= 0) ? b.hardness : 99;
+                    candidates.sort((a, b) => {
+                        const itemId = bot.heldItem ? bot.heldItem.type : null;
+                        const aCan = a.canHarvest(itemId) || vineNames.includes(a.name);
+                        const bCan = b.canHarvest(itemId) || vineNames.includes(b.name);
+                        if (aCan !== bCan) return aCan ? -1 : 1;   // 能挖的优先
+                        return hardnessOf(a) - hardnessOf(b);      // 同能挖则挑软的
+                    });
+
+                    let dugAny = false;
+                    for (const b of candidates) {
+                        const itemId = bot.heldItem ? bot.heldItem.type : null;
+                        if (!b.canHarvest(itemId) && !vineNames.includes(b.name)) {
+                            // 当前工具挖不动，尝试换一把更好的工具
+                            try { await bot.tool.equipForBlock(b); } catch (_) {}
+                            const newId = bot.heldItem ? bot.heldItem.type : null;
+                            if (!b.canHarvest(newId)) continue; // 换了还是挖不动，跳过
+                        } else {
+                            try { await bot.tool.equipForBlock(b); } catch (_) {}
+                        }
+                        try {
+                            await bot.dig(b, true);
+                            log(agent.name, `挖掉卡路的 ${b.name} 以脱困。`);
+                            dugAny = true;
+                        } catch (_) {}
+                    }
+
+                    // 实在挖不动任何东西就退后
+                    if (!dugAny) {
+                        await skills.moveAway(bot, 5);
+                    }
                     clearTimeout(crashTimeout);
                     say(agent, '我脱困啦！');
                 });

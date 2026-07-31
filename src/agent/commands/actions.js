@@ -489,6 +489,14 @@ export const actionsList = [
         })
     },
     {
+        name: '!goToShore',
+        description: '从水里/岸边爬上岸。若在水中会朝最近的岸跳出水面，若在陆地上则走到最近的岸边。',
+        params: {},
+        perform: runAsAction(async (agent) => {
+            await skills.goToShore(agent.bot);
+        })
+    },
+    {
         name: '!useOn',
         description: 'Use (right click) the given tool on the nearest target of the given type.',
         params: {
