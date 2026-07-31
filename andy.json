@@ -6,6 +6,11 @@
     },
     "model": {
         "api": "openai",
+        "model": "deepseek-v4-flash",
+        "url": "https://cpa.zygame1314-666.top/v1/"
+    },
+    "code_model": {
+        "api": "openai",
         "model": "glm-5.2",
         "url": "https://cpa.zygame1314-666.top/v1/"
     },

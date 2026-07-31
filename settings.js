@@ -27,7 +27,7 @@ const settings = {
     ],
 
     "load_memory": true, // load memory from previous session
-    "init_message": "Respond with hello world and your name", // sends to all on spawn
+    "init_message": "请用中文回复 hello world 和你的名字", // sends to all on spawn
     "only_chat_with": [], // users that the bots listen to and send general messages to. if empty it will chat publicly
 
     "speak": false,
@@ -37,7 +37,7 @@ const settings = {
     // Works on windows and mac, but linux requires you to install the espeak package through your package manager eg: `apt install espeak` `pacman -S espeak`.
 
     "chat_ingame": true, // bot responses are shown in minecraft chat
-    "language": "zh", // translate to/from this language. Supports these language names: https://cloud.google.com/translate/docs/languages
+    "language": "en", // translate to/from this language. Supports these language names: https://cloud.google.com/translate/docs/languages
     "render_bot_view": false, // show bot's view in browser at localhost:3000, 3001...
 
     "allow_insecure_coding": true, // allows newAction command and model can write/run code on your computer. enable at own risk
