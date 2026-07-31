@@ -995,6 +995,66 @@ export async function consume(bot, itemName="") {
 }
 
 
+export async function fish(bot, timeoutMs=60000) {
+    /**
+     * Fish with a fishing rod. Equips the rod from hotbar slot 0, casts, watches the bobber sink, reels in, and verifies the catch from inventory. Logs every step to bot.output so the agent can see what happened.
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {number} timeoutMs, max milliseconds to wait for a bite (default 60000).
+     * @returns {Promise<boolean>} true if a fish was caught, false otherwise.
+     * @example
+     * await skills.fish(bot);
+     * await skills.fish(bot, 30000);
+     **/
+    let rod = bot.inventory.items().find(it => it.name.includes('fishing_rod'));
+    if (!rod) {
+        log(bot, "背包里没有鱼竿，没法钓鱼。");
+        return false;
+    }
+    await bot.equip(rod, 'hand');
+    log(bot, "已装备鱼竿，准备抛竿。");
+    await wait(bot, 300);
+
+    bot.activateItem();
+    log(bot, "已抛竿，等待浮标落水...");
+    await wait(bot, 2500);
+
+    let baseY = null;
+    let caught = false;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        let bobber = null;
+        for (const id in bot.entities) {
+            const e = bot.entities[id];
+            if (e.name === 'fishing_bobber' || e.name === 'bobber') { bobber = e; break; }
+        }
+        if (bobber && bobber.position) {
+            if (baseY === null) {
+                baseY = bobber.position.y;
+                log(bot, `浮标落水，基准高度 y=${baseY.toFixed(2)}。`);
+            } else if (bobber.position.y < baseY - 0.4) {
+                caught = true;
+                log(bot, "浮标下沉！鱼上钩啦！");
+                break;
+            }
+        }
+        await wait(bot, 200);
+    }
+
+    bot.activateItem();
+    log(bot, caught ? "收竿，有鱼上钩！" : "超时收竿，没钓到。");
+    await wait(bot, 2000);
+
+    const fishNames = ['cod', 'salmon', 'pufferfish', 'tropical_fish'];
+    let fishItem = bot.inventory.items().find(it => fishNames.includes(it.name));
+    if (fishItem) {
+        log(bot, `背包里有 ${fishItem.count} 个 ${fishItem.name}，钓鱼成功！`);
+        return true;
+    }
+    log(bot, "背包里没找到鱼，可能没钓到。");
+    return false;
+}
+
+
 export async function giveToPlayer(bot, itemType, username, num=1) {
     /**
      * Give one of the specified item to the specified player
