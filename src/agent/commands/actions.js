@@ -497,6 +497,29 @@ export const actionsList = [
         })
     },
     {
+        name: '!fish',
+        description: 'Equip a fishing rod and fish. Waits up to the given timeout for a bite.',
+        params: {
+            'timeout_ms': { type: 'int', description: 'Maximum milliseconds to wait for a bite. Defaults to 60000.', domain: [1000, Number.MAX_SAFE_INTEGER] }
+        },
+        perform: runAsAction(async (agent, timeout_ms) => {
+            await skills.fish(agent.bot, timeout_ms || 60000);
+        }, false, 10) // 10 minute timeout
+    },
+    {
+        name: '!tillAndSow',
+        description: 'Till the ground at the given position and optionally plant the given seed type.',
+        params: {
+            'x': { type: 'int', description: 'The x coordinate to till.' },
+            'y': { type: 'int', description: 'The y coordinate to till.', domain: [-64, 320] },
+            'z': { type: 'int', description: 'The z coordinate to till.' },
+            'seed_type': { type: 'string', description: 'The item name of the seed to plant, or empty to only till the ground.' }
+        },
+        perform: runAsAction(async (agent, x, y, z, seed_type) => {
+            await skills.tillAndSow(agent.bot, x, y, z, seed_type || null);
+        })
+    },
+    {
         name: '!useOn',
         description: 'Use (right click) the given tool on the nearest target of the given type.',
         params: {
