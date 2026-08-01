@@ -293,12 +293,12 @@ export class Agent {
         if (from_other_bot)
             this.last_sender = source;
 
-        // If an action (especially newAction) is currently executing and this is
-        // a plain user chat message (not a command), queue it instead of running
-        // a concurrent promptConvo which would race with the running action / LLM call.
-        if (!this.isIdle() && !self_prompt && !from_other_bot) {
+        // If newAction is currently executing (long, uninterruptible LLM calls),
+        // queue plain user chat so it doesn't race a concurrent promptConvo.
+        // Other actions (followPlayer, etc.) should be interruptible immediately.
+        if (this.actions.currentActionLabel === 'action:newAction' && !self_prompt && !from_other_bot) {
             this._message_queue.push({ source, message });
-            console.log(this.name, `queued message from ${source} (action "${this.actions.currentActionLabel}" running, queue len ${this._message_queue.length})`);
+            console.log(this.name, `queued message from ${source} (newAction running, queue len ${this._message_queue.length})`);
             return false;
         }
 

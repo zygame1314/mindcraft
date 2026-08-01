@@ -177,6 +177,15 @@ export async function smeltItem(bot, itemName, num=1) {
         return false;
     }
 
+    // auto-eat 插件等可能把要冶炼的物品留在副手(slot 45)，而熔炉的
+    // putInput/putFuel 通过 bot.transfer 在熔炉窗口的玩家背包范围内查找物品，
+    // 副手不在该范围内，会导致"找不到物品"而冶炼失败。先把副手清回主背包。
+    const OFF_HAND_SLOT = 45;
+    const offHand = bot.inventory.slots[OFF_HAND_SLOT];
+    if (offHand && (offHand.name === itemName || mc.getItemId(itemName) === offHand.type)) {
+        await bot.unequip('off-hand');
+    }
+
     let placedFurnace = false;
     let furnaceBlock = undefined;
     const furnaceRange = 16;
@@ -435,6 +444,54 @@ export async function defendSelf(bot, range=9) {
 
 
 
+// 自实现的挖矿：站到方块旁 3 格内（远离 4.5 的挖掘距离边界，避免服务端判定超距
+// 导致 bot.dig 永久 await blockUpdate 而卡死），强制 lookAt 后挖掘，并给 dig 加超时。
+// 超时则重新靠近 + 重对准重挖，最多重试 maxAttempts 次。
+async function digBlockSafely(bot, block, maxAttempts = 3) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        // 站到方块旁，goal 范围 3 格，比 collectBlock 默认 reach 4.5 更稳妥
+        try {
+            await goToGoal(bot, new pf.goals.GoalNear(
+                block.position.x, block.position.y, block.position.z, 3));
+        } catch (err) {
+            if (String(err).includes('PathStopped') || String(err).includes('interrupted')) throw err;
+        }
+        await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
+
+        // 重新读取方块状态（可能已被前一次挖掉/更新）
+        const fresh = bot.blockAt(block.position);
+        if (!fresh || fresh.type === 0) return true;
+
+        // 动态超时：digTime * 1.5 + 3000ms 兜底，最少 5 秒
+        let timeoutMs = 5000;
+        try { timeoutMs = Math.max(timeoutMs, bot.digTime(fresh) * 1.5 + 3000); } catch (_) {}
+
+        let timedOut = false;
+        const timer = setTimeout(() => {
+            timedOut = true;
+            try { bot.stopDigging(); } catch (_) {}
+        }, timeoutMs);
+        try {
+            await bot.dig(fresh, true);
+            clearTimeout(timer);
+            return true;
+        } catch (err) {
+            clearTimeout(timer);
+            if (timedOut) {
+                // 超时：重新靠近再试
+                if (attempt < maxAttempts - 1) {
+                    await new Promise(r => setTimeout(r, 300));
+                    continue;
+                }
+                throw new Error(`挖 ${fresh.name} 超时（${Math.round(timeoutMs/1000)}s），服务端未破坏方块。`);
+            }
+            throw err;
+        }
+    }
+    return false;
+}
+
+
 export async function collectBlock(bot, blockType, num=1, exclude=null) {
     /**
      * Collect one of the given block type.
@@ -528,7 +585,8 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 success = true;
             }
             else {
-                await bot.collectBlock.collect(block);
+                await digBlockSafely(bot, block);
+                await pickupNearbyItems(bot);
                 success = true;
             }
             if (success)
@@ -997,9 +1055,15 @@ export async function viewChest(bot) {
         log(bot, `箱子是空的。`);
     }
     else {
-        log(bot, `箱子内容：`);
+        // 同名物品可能分散在多个槽位，合并计数后再输出，
+        // 避免输出过长被 getBotOutputSummary 截断导致中间物品（如铁锭）被隐藏。
+        const counts = {};
         for (let item of items) {
-            log(bot, `${item.count} 个 ${item.name}`);
+            counts[item.name] = (counts[item.name] || 0) + item.count;
+        }
+        log(bot, `箱子内容：`);
+        for (const name of Object.keys(counts)) {
+            log(bot, `${counts[name]} 个 ${name}`);
         }
     }
     await chestContainer.close();
@@ -1024,13 +1088,19 @@ export async function consume(bot, itemName="") {
         log(bot, `你没有 ${name} 可以吃。`);
         return false;
     }
-    // auto-eat 插件会把食物留在副手，导致 consume 失败；先清空副手再装备到主手
-    try {
-        const offHand = bot.inventory.slots[bot.inventory.getEquipmentSlot('off-hand')];
-        if (offHand && offHand.name === item.name) {
-            await bot.unequip('off-hand');
+    // auto-eat 插件会把食物留在副手(slot 45)，而 findInventoryItem 只在主背包
+    // 范围(9~44)内查找，副手里的食物查不到导致 consume 失败。先把副手清回主背包。
+    const OFF_HAND_SLOT = 45;
+    const offHand = bot.inventory.slots[OFF_HAND_SLOT];
+    if (offHand && offHand.name === item.name) {
+        await bot.unequip('off-hand');
+        // unequip 后物品回到主背包，重新查找
+        item = bot.inventory.findInventoryItem(itemName);
+        if (!item) {
+            log(bot, `无法把 ${name} 从副手取回。`);
+            return false;
         }
-    } catch (_) {}
+    }
     await bot.equip(item, 'hand');
     await bot.consume();
         log(bot, `已食用 ${item.name}。`);
@@ -1426,8 +1496,8 @@ export async function goToGoal(bot, goal) {
     for (let block of dontBreakBlocks) {
         nonDestructiveMovements.blocksCantBreak.add(mc.getBlockId(block));
     }
+    nonDestructiveMovements.canDig = false; // non-destructive path should never dig through blocks
     nonDestructiveMovements.placeCost = 2;
-    nonDestructiveMovements.digCost = 10;
 
     const destructiveMovements = new pf.Movements(bot);
 
@@ -1599,12 +1669,19 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
         return true;
     }
     
+    const unbreakableBlockIds = new Set();
     const checkDigProgress = () => {
         if (bot.targetDigBlock) {
             const targetBlock = bot.targetDigBlock;
             const itemId = bot.heldItem ? bot.heldItem.type : null;
             if (bot.game.gameMode !== 'creative' && !targetBlock.canHarvest(itemId)) {
-                log(bot, `路径规划停止：当前工具无法破坏 ${targetBlock.name}。`);
+                unbreakableBlockIds.add(targetBlock.type);
+                log(bot, `路径规划停止：当前工具无法破坏 ${targetBlock.name}，将绕开同类方块。`);
+                // make pathfinder avoid this block type on future recomputes
+                try {
+                    const moves = bot.pathfinder.movements;
+                    if (moves) moves.blocksCantBreak.add(targetBlock.type);
+                } catch (_) {}
                 bot.pathfinder.stop();
                 bot.stopDigging();
             }

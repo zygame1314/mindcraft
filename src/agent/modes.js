@@ -110,7 +110,15 @@ const modes_list = [
             if (cur_dig_block && !this.prev_dig_block) {
                 this.prev_dig_block = cur_dig_block;
             }
-            if (this.prev_location && this.prev_location.distanceTo(bot.entity.position) < this.distance && cur_dig_block == this.prev_dig_block) {
+            // Standing still while actively digging a block is normal, not stuck.
+            // Only accumulate stuck_time when the bot is NOT digging but still not moving.
+            if (cur_dig_block) {
+                this.stuck_time = 0;
+                this.prev_location = bot.entity.position.clone();
+                this.last_time = Date.now();
+                return;
+            }
+            if (this.prev_location && this.prev_location.distanceTo(bot.entity.position) < this.distance) {
                 this.stuck_time += (Date.now() - this.last_time) / 1000;
             }
             else {
