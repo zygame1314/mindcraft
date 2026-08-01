@@ -29,7 +29,23 @@ export class Coder {
     }
 
     async generateCode(agent_history) {
-        this.agent.bot.modes.pause('unstuck');
+        // pause all modes while generating/executing code so they don't
+        // trigger actions.stop() and kill the process mid-LLM-request
+        const modes = this.agent.bot.modes;
+        const paused = [];
+        if (modes) {
+            for (const name of modes.getModeNames ? modes.getModeNames() : []) {
+                if (modes.isOn(name) && !modes.isPaused(name)) {
+                    modes.pause(name);
+                    paused.push(name);
+                }
+            }
+        }
+        const restore = () => {
+            for (const name of paused) {
+                try { modes.unpause(name); } catch (_) {}
+            }
+        };
         lockdown();
         // this message history is transient and only maintained in this function
         let messages = agent_history.getHistory(); 
@@ -40,11 +56,30 @@ export class Coder {
 
         let code = null;
         let no_code_failures = 0;
+        let timeout_count = 0;
+        const MAX_TIMEOUTS = 2;
+        try {
         for (let i=0; i<MAX_ATTEMPTS; i++) {
             if (this.agent.bot.interrupt_code)
                 return null;
             const messages_copy = JSON.parse(JSON.stringify(messages));
-            let res = await this.agent.prompter.promptCoding(messages_copy);
+            let res;
+            try {
+                res = await this.agent.prompter.promptCoding(messages_copy);
+            } catch (e) {
+                if (this.agent.bot.interrupt_code)
+                    return null;
+                timeout_count++;
+                console.warn(`Code generation request failed: ${e.toString()}`);
+                if (timeout_count >= MAX_TIMEOUTS) {
+                    return `代码生成连续 ${timeout_count} 次失败（最近错误：${e.toString()}）。`;
+                }
+                messages.push({
+                    role: 'system',
+                    content: `上一次代码生成请求失败：${e.toString()}。请重新尝试。`
+                });
+                continue;
+            }
             if (this.agent.bot.interrupt_code)
                 return null;
             let contains_code = res.indexOf('```') !== -1;
@@ -111,6 +146,9 @@ export class Coder {
             }
         }
         return `代码生成在 ${MAX_ATTEMPTS} 次尝试后失败。`;
+        } finally {
+            restore();
+        }
     }
     
     async  _lintCode(code) {

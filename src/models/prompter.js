@@ -211,6 +211,20 @@ export class Prompter {
         this.last_prompt_time = Date.now();
     }
 
+    async withTimeout(promise, label='request') {
+        const secs = settings.llm_request_timeout_secs;
+        if (!secs || secs < 0) return await promise;
+        let timer;
+        const timeout = new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`LLM ${label} timed out after ${secs}s`)), secs * 1000);
+        });
+        try {
+            return await Promise.race([promise, timeout]);
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
     async promptConvo(messages) {
         this.most_recent_msg_time = Date.now();
         let current_msg_time = this.most_recent_msg_time;
@@ -226,7 +240,7 @@ export class Prompter {
             let generation;
 
             try {
-                generation = await this.chat_model.sendRequest(messages, prompt);
+                generation = await this.withTimeout(this.chat_model.sendRequest(messages, prompt), 'convo');
                 if (typeof generation !== 'string') {
                     console.error('Error: Generated response is not a string', generation);
                     throw new Error('Generated response is not a string');
@@ -271,8 +285,12 @@ export class Prompter {
         let prompt = this.profile.coding;
         prompt = await this.replaceStrings(prompt, messages, this.coding_examples);
 
-        let resp = await this.code_model.sendRequest(messages, prompt);
-        this.awaiting_coding = false;
+        let resp;
+        try {
+            resp = await this.withTimeout(this.code_model.sendRequest(messages, prompt), 'coding');
+        } finally {
+            this.awaiting_coding = false;
+        }
         await this._saveLog(prompt, messages, resp, 'coding');
         return resp;
     }

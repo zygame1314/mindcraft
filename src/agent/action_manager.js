@@ -9,7 +9,6 @@ export class ActionManager {
         this.resume_name = '';
         this.last_action_time = 0;
         this.recent_action_counter = 0;
-        this._stopPromise = null;
     }
 
     async resumeAction(actionFn, timeout) {
@@ -26,25 +25,25 @@ export class ActionManager {
 
     async stop() {
         if (!this.executing) return;
-        if (this._stopPromise) return this._stopPromise;
-
-        this._stopPromise = (async () => {
-            const timeout = setTimeout(() => {
-                console.error('Stop timeout reached. Forcing action state reset.');
-                this.executing = false; 
-                this.currentActionLabel = '';
-            }, 10000);
-
-            while (this.executing) {
-                this.agent.requestInterrupt();
-                await new Promise(resolve => setTimeout(resolve, 300));
+        // newAction involves long, uninterruptible LLM calls that cannot finish
+        // within the normal 10s window. Don't kill the process for those; just
+        // keep signalling the interrupt and wait patiently for the LLM to return.
+        const isCoding = this.currentActionLabel === 'action:newAction';
+        const killMs = isCoding ? 0 : 10000; // 0 means never force-kill
+        const timeout = killMs > 0 ? setTimeout(() => {
+            this.agent.cleanKill('Code execution refused stop after 10 seconds. Killing process.');
+        }, killMs) : null;
+        let waited = 0;
+        while (this.executing) {
+            this.agent.requestInterrupt();
+            if (isCoding && waited % 5000 === 0 && waited > 0) {
+                console.warn(`newAction still running (LLM request), waiting... (${waited/1000}s)`);
             }
-            clearTimeout(timeout);
-            this._stopPromise = null;
-        })();
-
-        return this._stopPromise;
-    } 
+            await new Promise(resolve => setTimeout(resolve, 300));
+            waited += 300;
+        }
+        if (timeout) clearTimeout(timeout);
+    }
 
     cancelResume() {
         this.resume_func = null;

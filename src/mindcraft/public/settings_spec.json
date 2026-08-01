@@ -127,6 +127,11 @@
         "description": "Number of minutes to allow code execution. -1 for no timeout",
         "default": -1
     },
+    "llm_request_timeout_secs": {
+        "type": "number",
+        "description": "Per LLM request hard timeout in seconds. If a single request doesn't return within this time, it is aborted and treated as a failed attempt so the agent can recover. -1 for no timeout.",
+        "default": 120
+    },
     "task": {
         "type": "object",
         "description": "The task object to give the agent on start. If null, the agent will not have a task.",
