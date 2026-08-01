@@ -462,6 +462,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
     const isLiquid = blockType === 'lava' || blockType === 'water';
 
     let collected = 0;
+    const failedPositions = []; // blocks that repeatedly failed, skip them
 
     const movements = new pf.Movements(bot);
     movements.dontMineUnderFallingBlock = false;
@@ -481,6 +482,9 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                         return false;
                     }
                 }
+            }
+            if (failedPositions.some(p => p.x === block.position.x && p.y === block.position.y && p.z === block.position.z)) {
+                return false;
             }
             if (isLiquid) {
                 // collect only source blocks
@@ -538,6 +542,10 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             }
             else {
                 log(bot, `收集 ${blockType} 失败：${err}。`);
+                if (String(err).includes('aborted') || String(err).includes('PathStopped')) {
+                    failedPositions.push(block.position);
+                }
+                await new Promise(resolve => setTimeout(resolve, 500));
                 continue;
             }
         }
@@ -565,7 +573,14 @@ export async function pickupNearbyItems(bot) {
         let movements = new pf.Movements(bot);
         movements.canDig = false;
         bot.pathfinder.setMovements(movements);
-        await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, 1));
+        try {
+            await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, 1));
+        } catch (err) {
+            if (String(err).includes('PathStopped') || String(err).includes('interrupted')) {
+                break; // interrupted by a new action, stop gracefully
+            }
+            throw err;
+        }
         await new Promise(resolve => setTimeout(resolve, 200));
         let prev = nearestItem;
         nearestItem = getNearestItem(bot);
