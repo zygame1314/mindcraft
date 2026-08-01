@@ -508,7 +508,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             await bot.equip(bucket, 'hand');
         }
         const itemId = bot.heldItem ? bot.heldItem.type : null
-        if (!block.canHarvest(itemId)) {
+        if (bot.game.gameMode !== 'creative' && !block.canHarvest(itemId)) {
             log(bot, `没有合适的工具来采集 ${blockType}。`);
             return false;
         }
@@ -1478,11 +1478,13 @@ function startDoorInterval(bot) {
             candidates.push(block);
         }
         // 智能排序：优先当前工具能挖且最软的，挖不动的排后面
+        const isCreative = bot.game.gameMode === 'creative';
+        const canDig = (b, id) => isCreative || b.canHarvest(id);
         const hardnessOf = b => (typeof b.hardness === 'number' && b.hardness >= 0) ? b.hardness : 99;
         candidates.sort((a, b) => {
             const itemId = bot.heldItem ? bot.heldItem.type : null;
-            const aCan = a.canHarvest(itemId);
-            const bCan = b.canHarvest(itemId);
+            const aCan = canDig(a, itemId);
+            const bCan = canDig(b, itemId);
             if (aCan !== bCan) return aCan ? -1 : 1;
             return hardnessOf(a) - hardnessOf(b);
         });
@@ -1490,7 +1492,7 @@ function startDoorInterval(bot) {
             try {
                 await bot.tool.equipForBlock(block);
                 const itemId = bot.heldItem ? bot.heldItem.type : null;
-                if (!block.canHarvest(itemId)) continue; // 换了工具还是挖不动，跳过
+                if (!canDig(block, itemId)) continue; // 换了工具还是挖不动，跳过
                 await bot.dig(block, true);
                 log(bot, `挖掉卡路的 ${block.name} 以脱困。`);
                 return true;
@@ -1586,7 +1588,7 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
         if (bot.targetDigBlock) {
             const targetBlock = bot.targetDigBlock;
             const itemId = bot.heldItem ? bot.heldItem.type : null;
-            if (!targetBlock.canHarvest(itemId)) {
+            if (bot.game.gameMode !== 'creative' && !targetBlock.canHarvest(itemId)) {
                 log(bot, `路径规划停止：当前工具无法破坏 ${targetBlock.name}。`);
                 bot.pathfinder.stop();
                 bot.stopDigging();

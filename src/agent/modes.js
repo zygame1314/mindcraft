@@ -161,11 +161,13 @@ const modes_list = [
                     }
 
                     // 智能排序：优先挖当前工具能采集且最软的；挖不动的排最后
+                    const isCreative = bot.game.gameMode === 'creative';
+                    const canDig = (b, id) => isCreative || b.canHarvest(id) || vineNames.includes(b.name);
                     const hardnessOf = b => (typeof b.hardness === 'number' && b.hardness >= 0) ? b.hardness : 99;
                     candidates.sort((a, b) => {
                         const itemId = bot.heldItem ? bot.heldItem.type : null;
-                        const aCan = a.canHarvest(itemId) || vineNames.includes(a.name);
-                        const bCan = b.canHarvest(itemId) || vineNames.includes(b.name);
+                        const aCan = canDig(a, itemId);
+                        const bCan = canDig(b, itemId);
                         if (aCan !== bCan) return aCan ? -1 : 1;   // 能挖的优先
                         return hardnessOf(a) - hardnessOf(b);      // 同能挖则挑软的
                     });
@@ -173,11 +175,11 @@ const modes_list = [
                     let dugAny = false;
                     for (const b of candidates) {
                         const itemId = bot.heldItem ? bot.heldItem.type : null;
-                        if (!b.canHarvest(itemId) && !vineNames.includes(b.name)) {
+                        if (!canDig(b, itemId)) {
                             // 当前工具挖不动，尝试换一把更好的工具
                             try { await bot.tool.equipForBlock(b); } catch (_) {}
                             const newId = bot.heldItem ? bot.heldItem.type : null;
-                            if (!b.canHarvest(newId)) continue; // 换了还是挖不动，跳过
+                            if (!canDig(b, newId)) continue; // 换了还是挖不动，跳过
                         } else {
                             try { await bot.tool.equipForBlock(b); } catch (_) {}
                         }
