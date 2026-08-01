@@ -23,6 +23,7 @@ export class Agent {
         this.last_sender = null;
         this.count_id = count_id;
         this._disconnectHandled = false;
+        this.lastMessageTime = 0;
 
         // Initialize components
         this.actions = new ActionManager(this);
@@ -258,6 +259,7 @@ export class Agent {
             return false;
         }
 
+        this.lastMessageTime = Date.now();
         let used_command = false;
         if (max_responses === null) {
             max_responses = settings.max_commands === -1 ? Infinity : settings.max_commands;
@@ -317,6 +319,14 @@ export class Agent {
         for (let i=0; i<max_responses; i++) {
             if (checkInterrupt()) break;
             let history = this.history.getHistory();
+            
+            // 检查在生成此响应期间是否有新消息到达
+            if (Date.now() - this.lastMessageTime < 1000) {
+                // 如果在等待 LLM 的过程中有新消息，则认为当前响应已过期，跳过执行
+                console.warn('Detected new message during LLM generation. Skipping obsolete response.');
+                break;
+            }
+
             let res = await this.prompter.promptConvo(history);
 
             console.log(`${this.name} full response to ${source}: ""${res}""`);
@@ -339,6 +349,13 @@ export class Agent {
                 }
 
                 if (checkInterrupt()) break;
+
+                // 再次检查：在生成响应后到执行指令前，是否又有新消息到达
+                if (Date.now() - this.lastMessageTime < 1000) {
+                    console.warn('Detected new message before command execution. Skipping obsolete command.');
+                    continue;
+                }
+
                 this.self_prompter.handleUserPromptedCmd(self_prompt, isAction(command_name));
 
                 if (settings.show_command_syntax === "full") {

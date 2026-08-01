@@ -9,6 +9,7 @@ export class ActionManager {
         this.resume_name = '';
         this.last_action_time = 0;
         this.recent_action_counter = 0;
+        this._stopPromise = null;
     }
 
     async resumeAction(actionFn, timeout) {
@@ -25,15 +26,24 @@ export class ActionManager {
 
     async stop() {
         if (!this.executing) return;
-        const timeout = setTimeout(() => {
-            this.agent.cleanKill('Code execution refused stop after 10 seconds. Killing process.');
-        }, 10000);
-        while (this.executing) {
-            this.agent.requestInterrupt();
-            console.log('waiting for code to finish executing...');
-            await new Promise(resolve => setTimeout(resolve, 300));
-        }
-        clearTimeout(timeout);
+        if (this._stopPromise) return this._stopPromise;
+
+        this._stopPromise = (async () => {
+            const timeout = setTimeout(() => {
+                console.error('Stop timeout reached. Forcing action state reset.');
+                this.executing = false; 
+                this.currentActionLabel = '';
+            }, 10000);
+
+            while (this.executing) {
+                this.agent.requestInterrupt();
+                await new Promise(resolve => setTimeout(resolve, 300));
+            }
+            clearTimeout(timeout);
+            this._stopPromise = null;
+        })();
+
+        return this._stopPromise;
     } 
 
     cancelResume() {

@@ -1411,12 +1411,15 @@ export async function goToGoal(bot, goal) {
     for (let block of dontBreakBlocks) {
         nonDestructiveMovements.blocksCantBreak.add(mc.getBlockId(block));
     }
-    nonDestructiveMovements.placeCost = 2;
-    nonDestructiveMovements.digCost = 10;
+    nonDestructiveMovements.allow1by1towers = true;
+    nonDestructiveMovements.placeCost = 1;
+    nonDestructiveMovements.digCost = 100;
 
     const destructiveMovements = new pf.Movements(bot);
+    destructiveMovements.allow1by1towers = true;
+    destructiveMovements.placeCost = 2;
+    destructiveMovements.digCost = 20;
 
-    let final_movements = destructiveMovements;
 
     const pathfind_timeout = 1000;
     if (await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout).status === 'success') {
