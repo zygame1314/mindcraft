@@ -47,7 +47,7 @@ const settings = {
     "llm_request_timeout_secs": 120, // per LLM request hard timeout in seconds. If a single request doesn't return within this time, it is aborted and treated as a failed attempt so the agent can recover. -1 for no timeout
     "relevant_docs_count": 5, // number of relevant code function docs to select for prompting. -1 for all
 
-    "max_messages": 15, // max number of messages to keep in context
+    "max_messages": 30, // max number of messages to keep in context
     "num_examples": 2, // number of examples to give to the model
     "max_commands": -1, // max number of commands that can be used in consecutive responses. -1 for no limit
     "show_command_syntax": "full", // "full", "shortened", or "none"

@@ -65,6 +65,24 @@ export class Agent {
 
         console.log(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
+
+        // 记忆钩子：skills.js 里的箱子操作在打开/存取后回调此函数，
+        // 自动把箱子坐标记进 memory_bank（用途留空，待 AI 用 !rememberChest 命名）。
+        // 不记具体物品——物品会变，记了就过期；要查内容用 !viewChest 实时看。
+        const self = this;
+        this.bot._recordChestMemory = (position) => {
+            try {
+                if (!position) return;
+                const pos = [position.x, position.y, position.z];
+                let name = self.memory_bank.findChestByPos(...pos);
+                if (!name) name = `箱子(${pos[0]},${pos[1]},${pos[2]})`;
+                // 已命名的不覆盖用途；新箱子标"用途未知"
+                const exists = self.memory_bank.recallChest(name);
+                self.memory_bank.rememberChest(name, exists?.purpose || '用途未知', pos);
+            } catch (e) {
+                console.warn('recordChestMemory error:', e.message);
+            }
+        };
         
         // Connection Handler
         const onDisconnect = (event, reason) => {

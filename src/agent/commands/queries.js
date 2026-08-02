@@ -221,11 +221,11 @@ export const queryList = [
     },
     {
         name: '!savedPlaces',
-        description: 'List all saved locations.',
+        description: '列出所有已记地点、箱子、笔记、永久事实的结构化记忆摘要。每轮对话已自动注入，这里可主动再查。',
         perform: async function (agent) {
-            return "Saved place names: " + agent.memory_bank.getKeys();
+            return agent.memory_bank.getSummary();
         }
-    }, 
+    },
     {
         name: '!checkBlueprintLevel',
         description: 'Check if the level is complete and what blocks still need to be placed for the blueprint',

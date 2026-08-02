@@ -119,7 +119,7 @@ export function initBot(username) {
     bot.loadPlugin(collectblock);
     bot.loadPlugin(autoEat);
     bot.loadPlugin(armorManager); // auto equip armor
-    bot.once('resourcePack', () => {
+    bot.once('resource_pack', () => {
         bot.acceptResourcePack();
     });
 
@@ -127,6 +127,57 @@ export function initBot(username) {
         mc_version = bot.version;
         mcdata = minecraftData(mc_version);
         Item = prismarine_items(mc_version);
+
+        // 修复 minecraft-data 上游 bug：1.20.5+ 的方块数据把铁矿石/煤矿石等的
+        // material 字段从 "mineable/pickaxe" 错误改成 "incorrect_for_wooden_tool" 等
+        // "工具不适配"标签。prismarine-block 的 digTime 用 registry.materials[this.material]
+        // 查工具倍率，而 incorrect_for_* 标签下没有工具倍率 → isBestTool 恒 false →
+        // blockBreakingSpeed 退回 1（手挖速度）。于是铁镐挖铁矿也算手挖，digTime 从
+        // 750ms 膨胀到 4550ms，挖矿慢 6 倍。
+        // 修复：patch bot.digTime，遇到 incorrect_for_* material 时，根据方块的
+        // harvestTools 工具 id 与各 mineable/* 标签的工具倍率表求交集，还原成正确的
+        // mineable/* material 再算 digTime。
+        const _origDigTime = bot.digTime.bind(bot);
+        const mineableTags = ['mineable/pickaxe', 'mineable/shovel', 'mineable/axe', 'mineable/hoe'];
+        // 缓存 incorrect_for_* → 正确 mineable 标签的映射（同版本不变）
+        const incorrectMaterialFix = {};
+        function resolveMineableMaterial(block) {
+            const mat = block.material;
+            if (!mat || !mat.startsWith('incorrect_for_')) return null;
+            if (incorrectMaterialFix[mat]) return incorrectMaterialFix[mat];
+            // harvestTools: {工具id: true}，用这些 id 与各 mineable/* 标签的倍率表求交集
+            const harvestIds = block.harvestTools ? Object.keys(block.harvestTools).map(Number) : [];
+            let best = null;
+            for (const tag of mineableTags) {
+                const table = mcdata?.materials?.[tag];
+                if (!table) continue;
+                const overlap = harvestIds.filter(id => table[id] != null);
+                if (overlap.length > 0) { best = tag; break; }
+            }
+            if (best) incorrectMaterialFix[mat] = best;
+            return best;
+        }
+        bot.digTime = function (block) {
+            const fixed = resolveMineableMaterial(block);
+            // bot 挖矿几乎都在地面，但 digTime 在 dig 极早期算，onGround 可能刚寻路到位
+            // 还在抖动（false），施加 5x 空中惩罚 → digTime 膨胀 5 倍（如铁矿 750→3750ms）。
+            // bot 挖矿场景强制按落地算，真正空中挖（搭桥/跳挖）极少且服务端会按真实
+            // 状态兜底，不会因 finish 偏早而崩。临时改 onGround 只影响本次 digTime 调用。
+            const origOnGround = bot.entity.onGround;
+            let patched = false;
+            if (!origOnGround) { bot.entity.onGround = true; patched = true; }
+            try {
+                if (fixed) {
+                    const origMat = block.material;
+                    block.material = fixed;
+                    try { return _origDigTime(block); }
+                    finally { block.material = origMat; }
+                }
+                return _origDigTime(block);
+            } finally {
+                if (patched) bot.entity.onGround = origOnGround;
+            }
+        };
     });
 
     return bot;

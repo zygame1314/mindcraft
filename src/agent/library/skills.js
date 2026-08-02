@@ -564,101 +564,6 @@ export async function defendSelf(bot, range = 9) {
 
 
 
-// 自实现的挖矿：用 GoalBreakBlock 站到能看见方块面且较近的位置（reach 3.5，
-// 远离 4.5 挖掘距离边界避免服务端判定超距），lookAt 强制对准后用 forceLook='ignore'
-// 挖掘——让 mineflayer 跳过 dig 内部的 lookAt（digFace 用默认 top 面），挖掘期间
-// 不再主动发 look 包。配合停掉 pathfinder，避免朝向变化触发服务端取消破坏进度
-// （表现为裂痕挖到最后一刻突然重置、空挥）。给 dig 加超时，卡住则重新靠近重挖。
-async function digBlockSafely(bot, block, maxAttempts = 3) {
-    log(bot, `[digBlockSafely] 目标 ${block.name} @ ${block.position.x},${block.position.y},${block.position.z}`);
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        // 用 GoalNear 站到方块旁 3 格内。原 mindcraft 即此实现。
-        // 注意：GoalBreakBlock/GoalLookAtBlock 在 pathfinder 2.4.5 有传参 bug
-        // （GoalBreakBlock 把 bot 而非 bot.world 传给 GoalLookAtBlock），导致
-        // isEnd 的 raycast 崩溃，故不用。GoalNear 简单可靠，配合下方二次距离校验。
-        let reached = true;
-        try {
-            await goToGoal(bot, new pf.goals.GoalNear(
-                block.position.x, block.position.y, block.position.z, 3));
-            log(bot, `[digBlockSafely] 寻路完成，bot 在 ${bot.entity.position.toString()}`);
-        } catch (err) {
-            // 被新动作打断：向上抛出，取消本次收集
-            if (String(err).includes('PathStopped') || String(err).includes('interrupted')) throw err;
-            // 寻路失败（无路径/超时/够不着）：不再继续 dig，否则 bot 原地对
-            // 远处方块空挥。返回 false 让 collectBlock 记入 failedPositions 换下一个。
-            log(bot, `[digBlockSafely] 寻路失败：${err}`);
-            reached = false;
-        }
-        if (!reached) return false;
-
-        // 二次距离校验：GoalBreakBlock 偶尔在 goal 提前结束时没真正靠近到可挖距离
-        // （路径尚未走完就被判到达），此时 dig 同样会空挥。够不着就当失败换目标。
-        const dist = bot.entity.position.distanceTo(block.position.offset(0.5, 0.5, 0.5));
-        if (dist > 4.5) {
-            log(bot, `[digBlockSafely] 距离太远（${dist.toFixed(2)}）够不着`);
-            return false;
-        }
-
-        // 等待 onGround 稳定：挖掘中若 onGround 抖成 false，物理会发 flying 包，
-        // 服务端据此取消破坏进度（表现为裂痕到满后重置、空挥）。
-        // 木镐/石镐挖 digTime 大的方块（如铁矿石、石头）特别容易踩中这个窗口。
-        let settled = false;
-        for (let i = 0; i < 20; i++) {
-            if (bot.entity.onGround) { settled = true; break; }
-            await new Promise(r => setTimeout(r, 50));
-        }
-
-        // 强制对准方块中心顶面（digFace 默认 top），forceLook=true 立即转向到位
-        await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
-
-        // 重新读取方块状态（可能已被前一次挖掉/更新）
-        const fresh = bot.blockAt(block.position);
-        if (!fresh || fresh.type === 0) {
-            log(bot, `[digBlockSafely] 目标方块已是空气/未加载`);
-            return false; // 方块已是空气：没挖到，判失败
-        }
-
-        // 停掉 pathfinder：挖掘期间若 pathfinder goal 仍活跃，它会持续微调
-        // 朝向/位置并发 look+position 包，服务端据此取消破坏进度。
-        try { bot.pathfinder.setGoal(null); } catch (_) { }
-        try { bot.pathfinder.setMovements(new pf.Movements(bot)); } catch (_) { }
-
-        // 动态超时：digTime * 1.5 + 3000ms 兜底，最少 5 秒
-        let timeoutMs = 5000;
-        try { timeoutMs = Math.max(timeoutMs, bot.digTime(fresh) * 1.5 + 3000); } catch (_) { }
-
-        let timedOut = false;
-        const timer = setTimeout(() => {
-            timedOut = true;
-            try { bot.stopDigging(); } catch (_) { }
-        }, timeoutMs);
-        try {
-            // forceLook='ignore'：跳过 dig 内部的 lookAt（不再发 look 包、不重算 digFace），
-            // 用我们刚 lookAt 对准的朝向挖。这样挖掘期间朝向保持稳定，物理同步包之外
-            // 不再有额外 look 包，避免服务端判定"看向别处方块"而取消破坏进度。
-            await bot.dig(fresh, 'ignore');
-            clearTimeout(timer);
-            log(bot, `[digBlockSafely] 成功挖掉 ${fresh.name}`);
-            return true;
-        } catch (err) {
-            clearTimeout(timer);
-            if (timedOut) {
-                // 超时：重新靠近再试
-                if (attempt < maxAttempts - 1) {
-                    log(bot, `[digBlockSafely] 挖超时，重试`);
-                    await new Promise(r => setTimeout(r, 300));
-                    continue;
-                }
-                log(bot, `[digBlockSafely] 挖超时（${Math.round(timeoutMs / 1000)}s）`);
-                throw new Error(`挖 ${fresh.name} 超时（${Math.round(timeoutMs / 1000)}s），服务端未破坏方块。`);
-            }
-            log(bot, `[digBlockSafely] dig 报错：${err}`);
-            throw err;
-        }
-    }
-    return false;
-}
-
 
 export async function collectBlock(bot, blockType, num = 1, exclude = null) {
     /**
@@ -726,8 +631,8 @@ export async function collectBlock(bot, blockType, num = 1, exclude = null) {
             // bot.findBlocks 用方块缓存，可能滞后（刚砍光的树仍被标成 oak_log），
             // 但实时 bot.blockAt 复验也会误判（边界/未加载区块瞬时读取不准），
             // 且把好方块误记入 failedPositions 后再也选不到，导致"找不到方块"。
-            // 故选块阶段信缓存选出候选，真正的"已是空气"校验交给 digBlockSafely
-            // 的 fresh 检查（已加二次距离校验防够不着空挥）+ 失败重试换下一个。
+            // 故选块阶段信缓存选出候选，真正的"已是空气"校验交给 collectBlock 插件
+            // （bot.collectBlock.collect 内部 bot.dig 前会复查 blockAt.type）+ 失败换下一个。
             let blocks = world.getNearestBlocksWhere(bot, block => {
                 // mineflayer findBlocks 在 palette 检测阶段会用 Block.fromStateId(stateId,0)
                 // 创建的临时 Block 调用 predicate，这些块无 position、只有 type/name，
@@ -821,13 +726,16 @@ export async function collectBlock(bot, blockType, num = 1, exclude = null) {
                     success = true;
                 }
                 else {
-                    const dugOk = await digBlockSafely(bot, block);
-                    if (!dugOk) {
-                        log(bot, `[collectBlock] digBlockSafely 失败，跳过该位置`);
+                    // 用 mineflayer-collectblock 插件（原版做法）：内部 GoalLookAtBlock
+                    // 寻路（isEnd 用 raycast 验证 bot 站到能看见方块面的位置）→ bot.dig →
+                    // 监听 itemDrop 自动拾取掉落物。一气呵成，不在外面逐块 pickup 造成折返。
+                    try {
+                        await bot.collectBlock.collect(block);
+                    } catch (collectErr) {
+                        log(bot, `[collectBlock] collect 失败：${collectErr}`);
                         failedPositions.push(block.position);
                         continue;
                     }
-                    await pickupNearbyItems(bot);
                     success = true;
                 }
                 if (success)
@@ -845,7 +753,8 @@ export async function collectBlock(bot, blockType, num = 1, exclude = null) {
                 }
                 else {
                     log(bot, `收集 ${blockType} 失败：${err}。`);
-                    if (String(err).includes('aborted') || String(err).includes('PathStopped')) {
+                    if (String(err).includes('aborted') || String(err).includes('PathStopped') ||
+                        String(err).includes('Block not in view')) {
                         failedPositions.push(block.position);
                     }
                     await new Promise(resolve => setTimeout(resolve, 500));
@@ -855,6 +764,13 @@ export async function collectBlock(bot, blockType, num = 1, exclude = null) {
 
             if (bot.interrupt_code)
                 break;
+        }
+
+        // 循环结束后统一拾取掉落物：循环中不再逐块 pickupNearbyItems，避免挖短
+        // digTime 方块（土/石头）时每块都转身追物品导致折返乱飘。多数掉落物挖出后
+        // 已被自动吸入背包；这里再补拾一次遗漏的。
+        if (dug > 0) {
+            try { await pickupNearbyItems(bot); } catch (_) { }
         }
 
         // 用背包增量校准真实收集量：挖掉的方块可能掉进岩浆/被水冲走/没捡到，
@@ -1287,6 +1203,11 @@ async function resolveChest(bot, x, y, z, range = 32) {
     return world.getNearestBlock(bot, 'chest', range);
 }
 
+// 供记忆命令复用的导出别名，避免重复实现。
+export async function _resolveChestForMemory(bot, x, y, z, range = 32) {
+    return resolveChest(bot, x, y, z, range);
+}
+
 function posStr(pos) {
     return `(${pos.x}, ${pos.y}, ${pos.z})`;
 }
@@ -1428,6 +1349,7 @@ export async function putInChest(bot, itemName, num = -1, x = null, y = null, z 
     const chestContainer = await bot.openContainer(chest);
     try {
         await chestContainer.deposit(item.type, null, to_put);
+        bot._recordChestMemory?.(chest.position);
         log(bot, `成功将 ${to_put} 个 ${itemName} 放入箱子 ${posStr(chest.position)}。`);
         return true;
     } catch (err) {
@@ -1484,6 +1406,7 @@ export async function takeFromChest(bot, itemName, num = -1, x = null, y = null,
         remaining -= toTakeFromSlot;
     }
 
+    bot._recordChestMemory?.(chest.position);
     await chestContainer.close();
     log(bot, `成功从箱子 ${posStr(chest.position)} 中取出了 ${totalTaken} 个 ${itemName}。`);
     return totalTaken > 0;
@@ -1509,6 +1432,7 @@ export async function viewChest(bot, x = null, y = null, z = null) {
     await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2);
     const chestContainer = await bot.openContainer(chest);
     let items = chestContainer.containerItems();
+    bot._recordChestMemory?.(chest.position);
     if (items.length === 0) {
         log(bot, `箱子 ${posStr(chest.position)} 是空的。`);
     }
@@ -2142,64 +2066,14 @@ function startDoorInterval(bot) {
             const props = block.getProperties ? block.getProperties() : block._properties;
             if (props && typeof props.open === 'boolean') return props.open;
         } catch (_) { }
-        return false; // 读不到状态就当关着，至少不会误关
+        // 读不到状态时返回 null（"未知"），调用方据此区分"真关着"与"状态不明"。
+        // 之前返回 false 会把读不到状态的开门当成关门去 activate，结果把开着的门关上，
+        // 于是 bot 路过开着的门时反复"关→卡→蹭开→关→卡"鬼畜。
+        return null;
     }
 
     function sameDoorPos(a, b) {
         return a && b && a.x === b.x && a.y === b.y && a.z === b.z;
-    }
-
-    async function digObstacle(bot) {
-        const pos = bot.entity.position;
-        const yaw = bot.entity.yaw;
-        const fx = Math.round(-Math.sin(yaw));
-        const fz = Math.round(Math.cos(yaw));
-        const passable = ['air', 'cave_air', 'water', 'lava', 'bedrock'];
-        const dirs = [
-            [fx, 0, fz], [fx, 1, fz], [fx, 2, fz],
-            [0, 1, 0], [0, 2, 0],
-            [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1],
-        ];
-        // 受保护建筑方块（玩家家的墙/屋顶等）绝不挖脱困，避免卡门就拆家。
-        // 只能挖自然地形（泥土/石头/沙子/矿石等）脱困。门/活板门/栅栏门是
-        // interactable，前面的扫描已尝试开它们，挖这里只针对真正堵死的洞穴。
-        const protectedIds = getProtectedBlockIds();
-        // 收集候选阻挡方块
-        let candidates = [];
-        for (const [dx, dy, dz] of dirs) {
-            const block = bot.blockAt(pos.offset(dx, dy, dz));
-            if (!block || passable.includes(block.name)) continue;
-            // 受保护方块不挖：宁愿卡住也不拆玩家家。门/活板门/栅栏门虽然
-            // 可交互，但前面的门扫描没开成（可能是铁门/被挡住），挖它们也
-            // 会破坏玩家建筑，故一并跳过——让 pathfinder 另寻路径或等门开。
-            if (protectedIds.has(block.type)) continue;
-            if (block.name && (block.name.includes('door') ||
-                block.name.includes('fence_gate') ||
-                block.name.includes('trapdoor'))) continue;
-            candidates.push(block);
-        }
-        // 智能排序：优先当前工具能挖且最软的，挖不动的排后面
-        const isCreative = bot.game.gameMode === 'creative';
-        const canDig = (b, id) => isCreative || b.canHarvest(id);
-        const hardnessOf = b => (typeof b.hardness === 'number' && b.hardness >= 0) ? b.hardness : 99;
-        candidates.sort((a, b) => {
-            const itemId = bot.heldItem ? bot.heldItem.type : null;
-            const aCan = canDig(a, itemId);
-            const bCan = canDig(b, itemId);
-            if (aCan !== bCan) return aCan ? -1 : 1;
-            return hardnessOf(a) - hardnessOf(b);
-        });
-        for (const block of candidates) {
-            try {
-                await bot.tool.equipForBlock(block);
-                const itemId = bot.heldItem ? bot.heldItem.type : null;
-                if (!canDig(block, itemId)) continue; // 换了工具还是挖不动，跳过
-                await bot.dig(block, true);
-                log(bot, `挖掉卡路的 ${block.name} 以脱困。`);
-                return true;
-            } catch (_) { }
-        }
-        return false;
     }
 
     const doorCheckInterval = setInterval(() => {
@@ -2210,7 +2084,7 @@ function startDoorInterval(bot) {
             stuck_time += now - prev_check;
         }
 
-        if (stuck_time > 500 && !isResolving) {
+        if (stuck_time > 1500 && !isResolving) {
             isResolving = true;
             stuck_time = 0;
             // shuffle positions so we're not always opening the same door
@@ -2245,14 +2119,22 @@ function startDoorInterval(bot) {
                     (block.name.includes('door') ||
                         block.name.includes('fence_gate') ||
                         block.name.includes('trapdoor'))) {
-                    // 关键：只 activate 关着的门。已开的门再 activate 会把它关上，
+                    // 关键：只 activate 确认关着的门。已开的门再 activate 会把它关上，
                     // 于是 bot 卡在已开门口 → 触发 → 关门 → 卡 → 触发 → 开门... 死循环。
-                    if (isDoorOpen(block)) {
-                        openedDoor = true; // 已开，不关它
+                    const openState = isDoorOpen(block);
+                    if (openState === true) {
+                        openedDoor = true; // 确认开着，不关它
                         doorBlock = block;
                         alreadyOpen = true;
                         break;
                     }
+                    if (openState === null) {
+                        // 状态读不到：可能门本来就是开的但 _properties 没同步过来。
+                        // 绝不 activate（会把开着门关上）。交给 pathfinder 自己处理，
+                        // 这里跳过这块继续找下一块，避免误关门造成"卡→蹭"鬼畜。
+                        continue;
+                    }
+                    // openState === false：确认关着，可以 activate
                     // 冷却：同一扇门 2 秒内不重复 activate（刚开过还在动画/位移中）
                     if (sameDoorPos(block.position, lastDoorPos) &&
                         Date.now() - lastDoorTime < DOOR_COOLDOWN) {
@@ -2270,9 +2152,14 @@ function startDoorInterval(bot) {
                     break;
                 }
             }
-            // 没有门可开就挖掉前方/头顶阻挡的方块（狭窄洞穴卡住）
+            // 没有门可开：不再 digObstacle 挖周围方块。挖方块会 bot.dig → 内部
+            // stopDigging 打断当前进行的动作（包括正在挖的矿），并 equipForBlock
+            // 反复切手持物，表现为"挖矿/导航时视线乱飘、切手、dig 全部 aborted"。
+            // 卡住时让 pathfinder 自己重规划绕路（destructiveMovements 的 canDig 路径
+            // 是规划内挖，不抢断当前 dig）。脱困挖方块统一由 unstuck mode（已改为
+            // moveAway 不挖）兜底，这里只开门、不挖。
             if (!openedDoor) {
-                digObstacle(bot).finally(() => { isResolving = false; });
+                isResolving = false;
             } else if (justOpened) {
                 // 刚开的门：开启动画还没结束，bot 跳推也穿不过去，反而会
                 // 卡门框。先安静等待 pathfinder 自己走过去；下一轮若仍卡住，

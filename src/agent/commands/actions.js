@@ -159,26 +159,34 @@ export const actionsList = [
     },
     {
         name: '!rememberHere',
-        description: 'Save the current location with a given name.',
-        params: {'name': { type: 'string', description: 'The name to remember the location as.' }},
-        perform: async function (agent, name) {
+        description: '把当前位置存为命名地点，可带备注。例：!rememberHere("家","箱子在西墙")。已存在同名会更新备注。',
+        params: {
+            'name': { type: 'string', description: '地点名，例如 "家"、"钓鱼点"。' },
+            'note': { type: 'string', description: '可选备注，例如 "箱子在西墙"、"出生点"。', optional: true }
+        },
+        perform: async function (agent, name, note) {
             const pos = agent.bot.entity.position;
-            agent.memory_bank.rememberPlace(name, pos.x, pos.y, pos.z);
-            return `Location saved as "${name}".`;
+            agent.memory_bank.rememberPlace(name, pos.x, pos.y, pos.z, note || '');
+            return `已记住地点 "${name}" 于 (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)})${note ? `，备注：${note}` : ''}。`;
         }
     },
     {
         name: '!goToRememberedPlace',
         description: 'Go to a saved location.',
         params: {'name': { type: 'string', description: 'The name of the location to go to.' }},
-        perform: runAsAction(async (agent, name) => {
-            const pos = agent.memory_bank.recallPlace(name);
+        perform: async function (agent, name) {
+            const resolved = agent.memory_bank.resolvePlaceName(name);
+            if (!resolved) {
+                skills.log(agent.bot, `没找到叫 "${name}" 的地点。用 !savedPlaces 看全部已记地点。`);
+                return;
+            }
+            const pos = agent.memory_bank.recallPlace(resolved);
             if (!pos) {
-            skills.log(agent.bot, `No location named "${name}" saved.`);
-            return;
+                skills.log(agent.bot, `地点 "${resolved}" 没有坐标。`);
+                return;
             }
             await skills.goToPosition(agent.bot, pos[0], pos[1], pos[2], 1);
-        })
+        }
     },
     {
         name: '!givePlayer',
@@ -544,5 +552,108 @@ export const actionsList = [
         perform: runAsAction(async (agent, tool_name, target) => {
             await skills.useToolOn(agent.bot, tool_name, target);
         })
+    },
+    {
+        name: '!rememberChest',
+        description: '给箱子记个别名+用途，之后靠用途找箱子，不记具体物品（物品会变，要看用 !viewChest）。例：!rememberChest("矿物箱","存挖到的矿石和锭")',
+        params: {
+            'name': { type: 'string', description: '箱子别名，例如 "矿物箱"、"食物箱"。' },
+            'purpose': { type: 'string', description: '这个箱子干啥用的，例如 "存挖到的矿石"、"放食物和农作物"。' }
+        },
+        perform: async function (agent, name, purpose) {
+            const bot = agent.bot;
+            const chest = await skills._resolveChestForMemory(bot);
+            if (!chest) {
+                skills.log(bot, '附近没有箱子可记录。');
+                return;
+            }
+            const pos = [chest.position.x, chest.position.y, chest.position.z];
+            agent.memory_bank.rememberChest(name, purpose || '', pos);
+            return `已记住箱子 "${name}" 于 (${pos[0]}, ${pos[1]}, ${pos[2]})，用途：${purpose || '未填'}。要看内容用 !viewChest。`;
+        }
+    },
+    {
+        name: '!recallChest',
+        description: '回忆之前用 !rememberChest 记过的某个箱子用途和坐标。要看箱子里的东西用 !viewChest。',
+        params: { 'name': { type: 'string', description: '箱子的别名。' } },
+        perform: async function (agent, name) {
+            const c = agent.memory_bank.recallChest(name);
+            if (!c) {
+                return `没记住过叫 "${name}" 的箱子。用 !savedPlaces 看全部。`;
+            }
+            let pos = c.pos ? `(${c.pos[0]}, ${c.pos[1]}, ${c.pos[2]})` : '位置未知';
+            return `箱子 "${name}" ${pos}，用途：${c.purpose || '未填'}。要看内容用 !viewChest(${c.pos ? `${c.pos[0]}, ${c.pos[1]}, ${c.pos[2]}` : ''})。`;
+        }
+    },
+    {
+        name: '!rememberNote',
+        description: '记一条自由文本笔记（关键事实、提醒、玩家偏好等），长期保留，不会随摘要覆盖丢失。例：!rememberNote("zygame1314喜欢生鱼")',
+        params: { 'text': { type: 'string', description: '笔记内容，尽量简短。' } },
+        perform: async function (agent, text) {
+            const ok = agent.memory_bank.addNote(text);
+            return ok ? `已记笔记："${text}"` : '笔记为空或已存在。';
+        }
+    },
+    {
+        name: '!recallNote',
+        description: '回忆笔记。不带参数列出最近所有笔记；带关键词列出含该词的笔记。例：!recallNote("zygame1314")',
+        params: { 'keyword': { type: 'string', description: '关键词，省略则列全部。', optional: true } },
+        perform: async function (agent, keyword) {
+            const notes = agent.memory_bank.recallNotes(keyword || null);
+            if (notes.length === 0) return keyword ? `没有含 "${keyword}" 的笔记。` : '还没有笔记。';
+            return notes.map(n => `- ${n.text}${n.ts ? ` (${new Date(n.ts).toLocaleString('zh-CN')})` : ''}`).join('\n');
+        }
+    },
+    {
+        name: '!rememberFact',
+        description: '记一条永久事实，永不会被对话摘要覆盖，适合最重要、最该一直记得的东西。例：!rememberFact("我的基地在主世界西南")',
+        params: { 'text': { type: 'string', description: '事实内容。' } },
+        perform: async function (agent, text) {
+            const ok = agent.memory_bank.addFact(text);
+            return ok ? `已记永久事实："${text}"` : '事实为空或已存在。';
+        }
+    },
+    {
+        name: '!forget',
+        description: '删除记忆。可删地点、箱子、笔记、永久事实。关键词命中即删。例：!forget("place","旧矿") !forget("note","生鱼") !forget("all")',
+        params: {
+            'kind': { type: 'string', description: '记忆类型：place / chest / note / fact / all。' },
+            'keyword': { type: 'string', description: '要删除的关键词。', optional: true }
+        },
+        perform: async function (agent, kind, keyword) {
+            const mb = agent.memory_bank;
+            const kw = keyword || '';
+            if (kind === 'place') {
+                if (!kw) return '需要关键词。';
+                const hit = Object.keys(mb.places).filter(k => k.includes(kw));
+                if (hit.length === 0) return `没有匹配 "${kw}" 的地点。`;
+                hit.forEach(k => delete mb.places[k]);
+                return `已删除地点：${hit.join(', ')}`;
+            }
+            if (kind === 'chest') {
+                if (!kw) return '需要关键词。';
+                const hit = Object.keys(mb.chests).filter(k => k.includes(kw));
+                if (hit.length === 0) return `没有匹配 "${kw}" 的箱子。`;
+                hit.forEach(k => delete mb.chests[k]);
+                return `已删除箱子：${hit.join(', ')}`;
+            }
+            if (kind === 'note') {
+                const n = mb.forgetNote(kw || null);
+                return n > 0 ? `已删除 ${n} 条笔记。` : '没有匹配的笔记。';
+            }
+            if (kind === 'fact') {
+                const n = mb.forgetFact(kw || null);
+                return n > 0 ? `已删除 ${n} 条永久事实。` : '没有匹配的事实。';
+            }
+            if (kind === 'all') {
+                const p = Object.keys(mb.places).length;
+                const c = Object.keys(mb.chests).length;
+                const nn = mb.notes.length;
+                const f = mb.facts.length;
+                mb.places = {}; mb.chests = {}; mb.notes = []; mb.facts = [];
+                return `已清空所有记忆（${p} 地点, ${c} 箱子, ${nn} 笔记, ${f} 事实）。`;
+            }
+            return `未知类型 "${kind}"。支持：place / chest / note / fact / all。`;
+        }
     },
 ];

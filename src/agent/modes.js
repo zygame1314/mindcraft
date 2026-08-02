@@ -122,9 +122,26 @@ const modes_list = [
             // 这是 pathfinder 正常执行攀爬 move 的表现，不是卡住。
             // 只要 pathfinder goal 还在（寻路未结束/未中断），就视为正常寻路中，
             // 重置 stuck_time，避免 unstuck 误判打断攀爬、去挖附近方块。
+            // 之前只检测"脚部"方块，漏掉了梯子/藤蔓的"边缘"场景：
+            //   - 入口：脚踩在梯子下方的固体方块上、面前是梯子（脚不在梯子里），
+            //     pathfinder 在原地微调对位准备贴墙，旧逻辑误判为卡住 → moveAway
+            //     把 bot 推离梯子，而 goal 仍在又把它拉回 → 反复横跳"鬼畜"。
+            //   - 出口：脚刚踏上顶部方块、脚下/身旁仍是梯子，同理。
+            // 改为检测脚、头、脚下及水平四邻，任一为攀爬物即视为"正在与梯子/藤蔓交互"。
+            // 真卡住（goal 已失效）时，下方 effectiveMax=8 的快速脱困仍会兜底。
             const climbableNames = ['ladder', 'vine', 'weeping_vines', 'weeping_vines_plant', 'twisting_vines', 'twisting_vines_plant', 'cave_vines', 'cave_vines_plant'];
-            const feetBlock = bot.blockAt(bot.entity.position);
-            const inClimbable = feetBlock && climbableNames.includes(feetBlock.name);
+            const _p = bot.entity.position;
+            const _isClimbable = b => b && climbableNames.includes(b.name);
+            const _around = [
+                bot.blockAt(_p),                    // 脚
+                bot.blockAt(_p.offset(0, 1, 0)),    // 头
+                bot.blockAt(_p.offset(0, -1, 0)),   // 脚下（出口/往下爬）
+                bot.blockAt(_p.offset(1, 0, 0)),    // 水平四邻（入口/贴墙对位）
+                bot.blockAt(_p.offset(-1, 0, 0)),
+                bot.blockAt(_p.offset(0, 0, 1)),
+                bot.blockAt(_p.offset(0, 0, -1)),
+            ];
+            const inClimbable = _around.some(_isClimbable);
             if (inClimbable && bot.pathfinder.goal) {
                 this.stuck_time = 0;
                 this.prev_location = bot.entity.position.clone();
@@ -151,77 +168,14 @@ const modes_list = [
                 this.stuck_time = 0;
                 execute(this, agent, async () => {
                     const crashTimeout = setTimeout(() => { agent.cleanKill("卡住了且无法脱困") }, 10000);
-                    const bot = agent.bot;
-                    const pos = bot.entity.position;
-                    const yaw = bot.entity.yaw;
-                    const fx = Math.round(-Math.sin(yaw));
-                    const fz = Math.round(Math.cos(yaw));
-                    const passable = ['air', 'cave_air', 'water', 'lava', 'bedrock'];
-                    const vineNames = ['vine', 'weeping_vines', 'weeping_vines_plant', 'twisting_vines', 'twisting_vines_plant', 'cave_vines', 'cave_vines_plant'];
-
-                    // 收集周围阻挡方块：前方/侧方/上方/脚下，挖掉能脱困的
-                    // 注意：跳过玩家建筑方块（木板/原木/石砖/玻璃/羊毛等），
-                    // unstuck 的 bot.dig 绕过 pathfinder，不受 goToGoal 的
-                    // blocksCantBreak 保护，必须在此显式过滤，否则 bot 会在
-                    // 箱子旁/墙边卡住时把玩家家的墙挖穿脱困。
-                    const protectedIds = skills.getProtectedBlockIds();
-                    let candidates = [];
-                    const dirs = [
-                        [fx, 0, fz], [fx, 1, fz], [fx, 2, fz],   // 前方同层、上方、头顶
-                        [0, 1, 0], [0, 2, 0],                     // 头顶
-                        [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], // 侧方
-                        [0, -1, 0],                               // 脚下
-                    ];
-                    for (const [dx, dy, dz] of dirs) {
-                        const b = bot.blockAt(pos.offset(dx, dy, dz));
-                        if (!b || passable.includes(b.name)) continue;
-                        if (protectedIds.has(b.type)) continue;   // 受保护建筑方块，不挖
-                        candidates.push(b);
-                    }
-                    // 藤蔓也加入候选（无碰撞但会缠住）
-                    for (let dx of [-1, 0, 1]) {
-                        for (let dy of [-1, 0, 1, 2]) {
-                            for (let dz of [-1, 0, 1]) {
-                                const b = bot.blockAt(pos.offset(dx, dy, dz));
-                                if (b && vineNames.includes(b.name)) candidates.push(b);
-                            }
-                        }
-                    }
-
-                    // 智能排序：优先挖当前工具能采集且最软的；挖不动的排最后
-                    const isCreative = bot.game.gameMode === 'creative';
-                    const canDig = (b, id) => isCreative || b.canHarvest(id) || vineNames.includes(b.name);
-                    const hardnessOf = b => (typeof b.hardness === 'number' && b.hardness >= 0) ? b.hardness : 99;
-                    candidates.sort((a, b) => {
-                        const itemId = bot.heldItem ? bot.heldItem.type : null;
-                        const aCan = canDig(a, itemId);
-                        const bCan = canDig(b, itemId);
-                        if (aCan !== bCan) return aCan ? -1 : 1;   // 能挖的优先
-                        return hardnessOf(a) - hardnessOf(b);      // 同能挖则挑软的
-                    });
-
-                    let dugAny = false;
-                    for (const b of candidates) {
-                        const itemId = bot.heldItem ? bot.heldItem.type : null;
-                        if (!canDig(b, itemId)) {
-                            // 当前工具挖不动，尝试换一把更好的工具
-                            try { await bot.tool.equipForBlock(b); } catch (_) {}
-                            const newId = bot.heldItem ? bot.heldItem.type : null;
-                            if (!canDig(b, newId)) continue; // 换了还是挖不动，跳过
-                        } else {
-                            try { await bot.tool.equipForBlock(b); } catch (_) {}
-                        }
-                        try {
-                            await bot.dig(b, true);
-                            log(agent.name, `挖掉卡路的 ${b.name} 以脱困。`);
-                            dugAny = true;
-                        } catch (_) {}
-                    }
-
-                    // 实在挖不动任何东西就退后
-                    if (!dugAny) {
-                        await skills.moveAway(bot, 5);
-                    }
+                    // 原版做法：只往后退脱困，不挖方块。
+                    // 旧实现会 bot.dig 周围方块脱困，但 bot.dig 内部会先 stopDigging 打断
+                    // 当前正在挖的目标方块——挖矿时 unstuck 一旦误判触发，就会抢断正在
+                    // 挖的矿，转头去挖"卡路方块"，表现为"挖到一半突然转头乱挖"。
+                    // collectBlock（插件 collectBlock.collect）内部虽会 pause('unstuck')，
+                    // 但 goToCoordinates/goToGoal 到位后、collectBlock 启动前的间隙，
+                    // unstuck 仍可能累计触发。改回原版 moveAway，绝不挖方块，从根上杜绝抢断。
+                    await skills.moveAway(bot, 5);
                     clearTimeout(crashTimeout);
                     say(agent, '我脱困啦！');
                 });
