@@ -2236,7 +2236,8 @@ function startDoorInterval(bot) {
 
             let openedDoor = false;
             let doorBlock = null;
-            let justOpened = false; // 本次循环新开的门（区别于本来已开/冷却中）
+            let justOpened = false; // 本次循环新开的门
+            let alreadyOpen = false; // 门本来就开着（不是我们开的），不需要辅助穿门
             for (let position of positions) {
                 let block = bot.blockAt(position);
                 if (block && block.name &&
@@ -2249,6 +2250,7 @@ function startDoorInterval(bot) {
                     if (isDoorOpen(block)) {
                         openedDoor = true; // 已开，不关它
                         doorBlock = block;
+                        alreadyOpen = true;
                         break;
                     }
                     // 冷却：同一扇门 2 秒内不重复 activate（刚开过还在动画/位移中）
@@ -2276,9 +2278,14 @@ function startDoorInterval(bot) {
                 // 卡门框。先安静等待 pathfinder 自己走过去；下一轮若仍卡住，
                 // 门动画也结束了，才进入跳推分支。这里只记录、不动作。
                 isResolving = false;
+            } else if (alreadyOpen) {
+                // 门本来就开着：pathfinder 能正常穿过敞开门洞，无需任何辅助。
+                // 之前的跳推反而把正常经过门的 bot 干扰成"卡着蹭"。直接放行，
+                // 重置 stuck_time 让下一轮检测从零开始，避免反复触发。
+                isResolving = false;
             } else {
-                // 门已开（本来开着或冷却中）且仍卡住：等开启动画结束（刚开门
-                // 后留 600ms 缓冲）再朝门中心跳推，把身体对齐穿过门洞。
+                // 门处于冷却中（刚开过、动画可能刚结束但仍卡住）：等开启动画
+                // 结束再朝门中心跳推，把身体对齐穿过门洞。
                 (async () => {
                     try {
                         if (doorJustOpenedAt > 0) {
