@@ -210,32 +210,52 @@ export const actionsList = [
     },
     {
         name: '!putInChest',
-        description: 'Put the given item in the nearest chest.',
+        description: 'Put the given item in a chest. By default the nearest chest; pass chest x/y/z to target a specific chest identified by !viewNearbyChests.',
         params: {
             'item_name': { type: 'ItemName', description: 'The name of the item to put in the chest.' },
-            'num': { type: 'int', description: 'The number of items to put in the chest.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'num': { type: 'int', description: 'The number of items to put in the chest.', domain: [1, Number.MAX_SAFE_INTEGER] },
+            'chest_x': { type: 'int', description: 'The x coordinate of the target chest. Omit to use the nearest chest.', optional: true, domain: [-Infinity, Infinity] },
+            'chest_y': { type: 'int', description: 'The y coordinate of the target chest. Omit to use the nearest chest.', optional: true, domain: [-64, 320] },
+            'chest_z': { type: 'int', description: 'The z coordinate of the target chest. Omit to use the nearest chest.', optional: true, domain: [-Infinity, Infinity] }
         },
-        perform: runAsAction(async (agent, item_name, num) => {
-            await skills.putInChest(agent.bot, item_name, num);
+        perform: runAsAction(async (agent, item_name, num, chest_x, chest_y, chest_z) => {
+            await skills.putInChest(agent.bot, item_name, num, chest_x, chest_y, chest_z);
         })
     },
     {
         name: '!takeFromChest',
-        description: 'Take the given items from the nearest chest.',
+        description: 'Take the given items from a chest. By default the nearest chest; pass chest x/y/z to target a specific chest identified by !viewNearbyChests.',
         params: {
             'item_name': { type: 'ItemName', description: 'The name of the item to take.' },
-            'num': { type: 'int', description: 'The number of items to take.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'num': { type: 'int', description: 'The number of items to take.', domain: [1, Number.MAX_SAFE_INTEGER] },
+            'chest_x': { type: 'int', description: 'The x coordinate of the target chest. Omit to use the nearest chest.', optional: true, domain: [-Infinity, Infinity] },
+            'chest_y': { type: 'int', description: 'The y coordinate of the target chest. Omit to use the nearest chest.', optional: true, domain: [-64, 320] },
+            'chest_z': { type: 'int', description: 'The z coordinate of the target chest. Omit to use the nearest chest.', optional: true, domain: [-Infinity, Infinity] }
         },
-        perform: runAsAction(async (agent, item_name, num) => {
-            await skills.takeFromChest(agent.bot, item_name, num);
+        perform: runAsAction(async (agent, item_name, num, chest_x, chest_y, chest_z) => {
+            await skills.takeFromChest(agent.bot, item_name, num, chest_x, chest_y, chest_z);
         })
     },
     {
         name: '!viewChest',
-        description: 'View the items/counts of the nearest chest.',
-        params: { },
-        perform: runAsAction(async (agent) => {
-            await skills.viewChest(agent.bot);
+        description: 'View the items/counts of a chest. By default the nearest chest; pass chest x/y/z to target a specific chest identified by !viewNearbyChests.',
+        params: {
+            'chest_x': { type: 'int', description: 'The x coordinate of the target chest. Omit to view the nearest chest.', optional: true, domain: [-Infinity, Infinity] },
+            'chest_y': { type: 'int', description: 'The y coordinate of the target chest. Omit to view the nearest chest.', optional: true, domain: [-64, 320] },
+            'chest_z': { type: 'int', description: 'The z coordinate of the target chest. Omit to view the nearest chest.', optional: true, domain: [-Infinity, Infinity] }
+        },
+        perform: runAsAction(async (agent, chest_x, chest_y, chest_z) => {
+            await skills.viewChest(agent.bot, chest_x, chest_y, chest_z);
+        })
+    },
+    {
+        name: '!viewNearbyChests',
+        description: 'List all chests within range with their coordinates and contents. Use this to tell multiple chests apart, then target a specific chest with !viewChest/!putInChest/!takeFromChest using its x/y/z.',
+        params: {
+            'range': { type: 'int', description: 'The search radius in blocks. Defaults to 32.', optional: true, domain: [1, 128], default: 32 }
+        },
+        perform: runAsAction(async (agent, range) => {
+            await skills.viewNearbyChests(agent.bot, range);
         })
     },
     {
@@ -282,12 +302,7 @@ export const actionsList = [
             'num': { type: 'int', description: 'The number of times to smelt the item.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, item_name, num) => {
-            let success = await skills.smeltItem(agent.bot, item_name, num);
-            if (success) {
-                setTimeout(() => {
-                    agent.cleanKill('Safely restarting to update inventory.');
-                }, 500);
-            }
+            await skills.smeltItem(agent.bot, item_name, num);
         })
     },
     {

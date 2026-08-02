@@ -109,15 +109,35 @@ export function parseCommandMessage(message) {
 
     const params = commandParams(command);
     const paramNames = commandParamNames(command);
-    
+
+    // Fill in defaults for trailing optional params so the agent can omit them.
+    // Optional params must come last; we only backfill from the end.
+    if (args.length < params.length) {
+        let firstMissing = args.length;
+        // every param from firstMissing onward must be optional
+        for (let i = firstMissing; i < params.length; i++) {
+            if (!params[i].optional)
+                return `Command ${command.name} was given ${args.length} args, but requires ${params.length} args.`;
+        }
+        for (let i = firstMissing; i < params.length; i++) {
+            args[i] = params[i].default;
+        }
+    }
+
     if (args.length !== params.length)
         return `Command ${command.name} was given ${args.length} args, but requires ${params.length} args.`;
 
     
     for (let i = 0; i < args.length; i++) {
         const param = params[i];
+        // Params filled from defaults are already the correct type; skip parsing.
+        let arg = args[i];
+        if (typeof arg !== 'string') {
+            args[i] = arg;
+            continue;
+        }
         //Remove any extra characters
-        let arg = args[i].trim();
+        arg = arg.trim();
         if ((arg.startsWith('"') && arg.endsWith('"')) || (arg.startsWith("'") && arg.endsWith("'"))) {
             arg = arg.substring(1, arg.length-1);
         }

@@ -118,6 +118,19 @@ const modes_list = [
                 this.last_time = Date.now();
                 return;
             }
+            // 攀爬梯子/藤蔓时，bot 经常"原地小幅抖动上下"（在梯子上反复贴墙微调），
+            // 这是 pathfinder 正常执行攀爬 move 的表现，不是卡住。
+            // 只要 pathfinder goal 还在（寻路未结束/未中断），就视为正常寻路中，
+            // 重置 stuck_time，避免 unstuck 误判打断攀爬、去挖附近方块。
+            const climbableNames = ['ladder', 'vine', 'weeping_vines', 'weeping_vines_plant', 'twisting_vines', 'twisting_vines_plant', 'cave_vines', 'cave_vines_plant'];
+            const feetBlock = bot.blockAt(bot.entity.position);
+            const inClimbable = feetBlock && climbableNames.includes(feetBlock.name);
+            if (inClimbable && bot.pathfinder.goal) {
+                this.stuck_time = 0;
+                this.prev_location = bot.entity.position.clone();
+                this.last_time = Date.now();
+                return;
+            }
             if (this.prev_location && this.prev_location.distanceTo(bot.entity.position) < this.distance) {
                 this.stuck_time += (Date.now() - this.last_time) / 1000;
             }
@@ -128,9 +141,10 @@ const modes_list = [
             }
             const max_stuck_time = cur_dig_block?.name === 'obsidian' ? this.max_stuck_time * 2 : this.max_stuck_time;
             // 脚下/身处在藤蔓类方块上时，更快判定为卡住（红树林沼泽常见）
-            const vineNames = ['vine', 'weeping_vines', 'weeping_vines_plant', 'twisting_vines', 'twisting_vines_plant', 'cave_vines', 'cave_vines_plant'];
-            const feetBlock = bot.blockAt(bot.entity.position);
-            const inVine = feetBlock && vineNames.includes(feetBlock.name);
+            // 注意：上方已在 pathfinder.goal 存在时提前 return，这里只剩"goal 已失效但
+            // 仍卡在藤蔓里"的情况——那才是真卡住，快速脱困。
+            const vineNames = climbableNames;
+            const inVine = inClimbable;
             const effectiveMax = inVine ? Math.min(max_stuck_time, 8) : max_stuck_time;
             if (this.stuck_time > effectiveMax) {
                 say(agent, '我卡住啦！');
@@ -146,6 +160,11 @@ const modes_list = [
                     const vineNames = ['vine', 'weeping_vines', 'weeping_vines_plant', 'twisting_vines', 'twisting_vines_plant', 'cave_vines', 'cave_vines_plant'];
 
                     // 收集周围阻挡方块：前方/侧方/上方/脚下，挖掉能脱困的
+                    // 注意：跳过玩家建筑方块（木板/原木/石砖/玻璃/羊毛等），
+                    // unstuck 的 bot.dig 绕过 pathfinder，不受 goToGoal 的
+                    // blocksCantBreak 保护，必须在此显式过滤，否则 bot 会在
+                    // 箱子旁/墙边卡住时把玩家家的墙挖穿脱困。
+                    const protectedIds = skills.getProtectedBlockIds();
                     let candidates = [];
                     const dirs = [
                         [fx, 0, fz], [fx, 1, fz], [fx, 2, fz],   // 前方同层、上方、头顶
@@ -156,6 +175,7 @@ const modes_list = [
                     for (const [dx, dy, dz] of dirs) {
                         const b = bot.blockAt(pos.offset(dx, dy, dz));
                         if (!b || passable.includes(b.name)) continue;
+                        if (protectedIds.has(b.type)) continue;   // 受保护建筑方块，不挖
                         candidates.push(b);
                     }
                     // 藤蔓也加入候选（无碰撞但会缠住）
