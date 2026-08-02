@@ -310,31 +310,130 @@ export const queryList = [
     },
     {
         name: '!searchWiki',
-        description: 'Search the Minecraft Wiki for the given query.',
+        description: 'Search the Minecraft Wiki for the given query. Use English page names (e.g. "iron_ingot" or "iron ingot") for best results.',
         params: {
-            'query': { type: 'string', description: 'The query to search for.' }
+            'query': { type: 'string', description: 'The query to search for, preferably an English wiki page name.' }
         },
         perform: async function (agent, query) {
-            const url = `https://minecraft.wiki/w/${query}`
-            try {
-                const response = await fetch(url);
-                if (response.status === 404) {
-                  return `${query} was not found on the Minecraft Wiki. Try adjusting your search term.`;
-                }
-                const html = await response.text();
-                const $ = load(html);
-            
-                const parserOutput = $("div.mw-parser-output");
-                
-                parserOutput.find("table.navbox").remove();
+            // minecraft.wiki 直接把 query 拼进 URL（https://minecraft.wiki/w/<query>），
+            // 但未做 URL 编码：含空格/中文/特殊字符的 query 会得到 404（或被服务器
+            // 误解析），表现为"啥都搜不到"。此外即使命中页面，原版只做 navbox 移除，
+            // 返回的是带大量空行、JSON-LD、目录导航的 HTML 转文本噪音，AI 很难读。
+            //
+            // 修复策略：
+            //   1. URL 编码 query，并把空格/中文转成 wiki 接受的形式；
+            //   2. 精确页 404 时退到 Special:Search 搜索页，解析前若干结果标题，
+            //      再逐个抓取并挑选首段正文最长的那个；
+            //   3. 文本清洗：去掉脚本/样式/JSON-LD/导航框/目录/注释/连续空行，
+            //      只保留真正可读的条目正文；
+            //   4. 加超时与截断，避免 hang 或返回超长内容塞爆 LLM 上下文。
+            const WIKI = 'https://minecraft.wiki';
+            const TIMEOUT_MS = 15000;
+            const MAX_CHARS = 4000;
+            const raw = String(query ?? '').trim();
+            if (!raw) return 'Please provide a query to search the Minecraft Wiki.';
 
-                const divContent = parserOutput.text();
-            
-                return divContent.trim();
-              } catch (error) {
-                console.error("Error fetching or parsing HTML:", error);
-                return `The following error occurred: ${error}`
-              }
+            // wiki 页面名用下划线分隔单词效果最好（如 "iron_ingot"），
+            // 但 URL 编码也能处理普通空格，所以两种都支持。
+            const pageName = raw.replace(/\s+/g, '_');
+            const directUrl = `${WIKI}/w/${encodeURIComponent(pageName)}`;
+
+            async function fetchWithTimeout(url) {
+                const ctrl = new AbortController();
+                const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+                try {
+                    return await fetch(url, {
+                        signal: ctrl.signal,
+                        headers: { 'Accept-Language': 'en-US,en;q=0.9' },
+                        redirect: 'follow',
+                    });
+                } finally { clearTimeout(t); }
+            }
+
+            // 清洗 HTML 转出的文本：去掉脚本/样式/JSON-LD/导航/目录/注释，
+            // 压缩连续空白，截断到 MAX_CHARS。返回 null 表示这不是有效条目页。
+            function cleanWikiText($) {
+                const out = $("div.mw-parser-output");
+                if (out.length === 0) return null;
+                // 移除噪音节点：导航框、信息框、目录、脚本、样式、编辑链接、引用标记等。
+                // 信息框（table.infobox / .infobox）序列化后会变成一大段
+                // {"title":...,"rows":[...]} 的 JSON 噪音塞满文本，且与正文重复，
+                // 故直接删节点；条目真正的属性/合成信息在正文段落里也有。
+                out.find(
+                    'script,style,noscript,table.navbox,table.infobox,.infobox,' +
+                    'div.toc,ul.toc,.mw-editsection,.reference,' +
+                    '.noprint,.mw-empty-elt,style[data-mw-deduplicate]'
+                ).remove();
+                let text = out.text();
+                if (!text) return null;
+                // 去掉 <script>/<style> 内联残留与 HTML 注释
+                text = text.replace(/<[^>]+>/g, ' ');
+                text = text.replace(/<!--[\s\S]*?-->/g, ' ');
+                // 兜底：万一还有漏网的 info-box JSON 数据块，用正则去掉
+                text = text.replace(/\{\s*"title"\s*:[\s\S]*?\n\s*\}\s*\n/g, ' ');
+                // 压缩空白：连续空白/空行合并成单个换行或空格
+                text = text.replace(/[ \t]+/g, ' ')
+                    .replace(/\n[ \t]+/g, '\n')
+                    .replace(/\n{3,}/g, '\n\n')
+                    .trim();
+                // 过短的通常是错误页/重定向残留
+                if (text.length < 50) return null;
+                return text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) + '\n...(truncated)' : text;
+            }
+
+            async function getPageText(url) {
+                const resp = await fetchWithTimeout(url);
+                if (resp.status === 404) return null;
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const html = await resp.text();
+                const $ = load(html);
+                return cleanWikiText($);
+            }
+
+            async function searchFallback(queryTerm) {
+                // Special:Search 搜索页：解析结果链接标题，逐个抓取正文。
+                const searchUrl = `${WIKI}/w/Special:Search?search=${encodeURIComponent(queryTerm)}&fulltext=1`;
+                const resp = await fetchWithTimeout(searchUrl);
+                if (!resp.ok) return null;
+                const html = await resp.text();
+                const $ = load(html);
+                const titles = [];
+                // 搜索结果链接用 /w/ 前缀（非 /wiki/），标题在 .mw-search-result-heading 的首个 a。
+                // 过滤掉分页/排序/命名空间等非条目链接（href 含 Special: 或带 offset/limit）。
+                $('.mw-search-result-heading a').slice(0, 8).each((_, el) => {
+                    const t = $(el).attr('title');
+                    const href = $(el).attr('href') || '';
+                    if (!t) return;
+                    if (href.includes('Special:')) return;
+                    if (/offset=|limit=|profile=/.test(href)) return;
+                    if (!titles.includes(t)) titles.push(t);
+                });
+                if (titles.length === 0) return null;
+                for (const title of titles) {
+                    try {
+                        const text = await getPageText(`${WIKI}/w/${encodeURIComponent(title.replace(/\s+/g, '_'))}`);
+                        if (text) return { title, text };
+                    } catch (_) { /* try next */ }
+                }
+                return null;
+            }
+
+            try {
+                // 1) 先试精确页
+                const direct = await getPageText(directUrl);
+                if (direct) {
+                    return pad(`[Minecraft Wiki: ${pageName.replace(/_/g, ' ')}]\n\n${direct}`);
+                }
+                // 2) 精确页 404/无效 → 走搜索
+                const hit = await searchFallback(raw);
+                if (hit) {
+                    return pad(`[Minecraft Wiki: ${hit.title}] (matched by search for "${raw}")\n\n${hit.text}`);
+                }
+                return `"${raw}" was not found on the Minecraft Wiki. Try an English page name (e.g. "iron_ingot").`;
+            } catch (error) {
+                console.error("Error fetching or parsing Minecraft Wiki:", error);
+                return `Error searching the Minecraft Wiki: ${error.message || error}`;
+            }
         }
     },
     {

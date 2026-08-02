@@ -610,6 +610,7 @@ export async function collectBlock(bot, blockType, num = 1, exclude = null) {
     let dug = 0; // 成功挖掉的方块数（不等于实际进背包的数量）
     let result = false;
     const failedPositions = []; // blocks that repeatedly failed, skip them
+    let lastDugPos = null; // 上一个成功挖掉的位置，用于沿同一树干自下而上连挖
 
     const movements = new pf.Movements(bot);
     movements.dontMineUnderFallingBlock = false;
@@ -693,6 +694,19 @@ export async function collectBlock(bot, blockType, num = 1, exclude = null) {
                 // 不再用"周围空气多"加分：树叶丛中空气多但悬空，反而误导选树顶。
                 let score = dp + dy * dy * 4;
                 score += grounded ? -50 : 60;
+                // 沿同一树干自下而上连挖：挖掉 y 后下一轮里 y+1 的方块虽然下方变空
+                // （grounded=false 加 60）会显得"悬空难够"，但 bot 其实仍站在刚挖出的
+                // 空位上抬头就能挖到。给它强负分让 bot 优先把同一棵树挖完，而不是
+                // 跳到旁边别的树的顶部，留下本树中间一格悬空。
+                if (lastDugPos) {
+                    const dx = b.position.x - lastDugPos.x;
+                    const dz = b.position.z - lastDugPos.z;
+                    const dyy = b.position.y - lastDugPos.y;
+                    // 同一列正上方（x/z 相同、y 高 1）：大概率是同一棵树干的下一格
+                    if (dx === 0 && dz === 0 && dyy === 1) {
+                        score -= 120;
+                    }
+                }
                 return { b, score };
             }).sort((a, b) => a.score - b.score).map(x => x.b);
 
@@ -713,6 +727,17 @@ export async function collectBlock(bot, blockType, num = 1, exclude = null) {
             if (bot.game.gameMode !== 'creative' && !block.canHarvest(itemId)) {
                 log(bot, `没有合适的工具来采集 ${blockType}。`);
                 return false;
+            }
+            // 镐子耐久预警：手持工具快爆时停下，告诉 AI 让它自己决定
+            // （合成新镐子/换备用/撤退），避免挖到一半工具消失后卡在井下上不来。
+            // mineflayer item：durabilityUsed 已用耐久，maxDurability 总耐久。
+            if (bot.heldItem && bot.game.gameMode !== 'creative') {
+                const it = bot.heldItem;
+                if (it.maxDurability > 0 && it.durabilityUsed >= it.maxDurability - 3) {
+                    const left = it.maxDurability - it.durabilityUsed;
+                    log(bot, `警告：手持 ${it.name} 仅剩 ${left} 点耐久，快爆了！已停止挖矿。请合成/换备用镐子，或用 !goToSurface 先回地面。`);
+                    return false;
+                }
             }
             try {
                 let success = false;
@@ -738,8 +763,12 @@ export async function collectBlock(bot, blockType, num = 1, exclude = null) {
                     }
                     success = true;
                 }
-                if (success)
+                if (success) {
                     dug++;
+                    // 记录刚挖掉的位置：下一轮选块时优先选其正上方，沿同一树干
+                    // 自下而上挖完整棵树，避免挖掉底部后跳走、留下中间格悬空。
+                    lastDugPos = block.position;
+                }
                 // 不在 collectBlock 循环里 autoLight：挖一块就放一次火把，
                 // 砍树时 bot 不断站进刚挖出的原木空位（脚下 air），每次都触发
                 // shouldPlaceTorch → 放在脚下失败/反复放 → "火把鬼畜"。
@@ -1247,46 +1276,49 @@ export async function viewNearbyChests(bot, range = 32) {
         const positions = [chest.position];
         seen.add(key(chest.position));
         const t = chestType(chest);
-        if (t && t !== 'single') {
-            // 双联：找相邻且也非 single 的另一个方块
-            for (const other of chests) {
-                if (seen.has(key(other.position))) continue;
-                const ot = chestType(other);
-                if (ot && ot !== 'single' && isAdjacent(chest.position, other.position)) {
-                    positions.push(other.position);
-                    seen.add(key(other.position));
-                    break;
-                }
+        // 合并双联箱子：
+        // - type 属性可读且非 single：找相邻且 type 也非 single 的配对方块合并。
+        // - type 读不到（undefined/null，旧版本/某些箱子）：fallback 到"单纯相邻即合并"，
+        //   找任意相邻箱子方块合并。注释原本就说"为版本兼容也接受单纯相邻"，
+        //   但旧实现 `t && t !== 'single'` 在 type 读不到时直接跳过了合并，
+        //   导致 x 方向相邻的双联箱子（内容相同）被拆成两条输出。
+        const canPairByType = t && t !== 'single';
+        for (const other of chests) {
+            if (seen.has(key(other.position))) continue;
+            const ot = chestType(other);
+            if (!isAdjacent(chest.position, other.position)) continue;
+            const match = canPairByType
+                ? (ot && ot !== 'single')
+                : true; // type 读不到：相邻即合并
+            if (match) {
+                positions.push(other.position);
+                seen.add(key(other.position));
+                break;
             }
         }
         containers.push(positions);
     }
 
-    // 输出预算：getBotOutputSummary 超过 1000 字符会砍掉中间内容，这里把
-    // 单次概览控制在 ~800 字符内，每箱一行、每箱最多列前 4 种物品（用
-    // "+N 种"表示剩余），箱子数过多时只列最近的若干个并提示其余需缩小 range 查看。
-    const MAX_CHARS = 800;
-    const PER_CHEST_TYPES = 4;
-    const HEADER = `附近 ${range} 格内共 ${containers.length} 个箱子：\n`;
-    // 粗略估算：每行约 80 字符（双联箱子会列两个坐标）；先按上限猜，列不下再截断
-    let maxContainers = Math.max(1, Math.floor((MAX_CHARS - HEADER.length) / 80));
-    const listContainers = containers.slice(0, maxContainers);
-    const omitted = containers.length - listContainers.length;
-
-    log(bot, HEADER.trimEnd());
-    for (const positions of listContainers) {
+    // 两阶段：先全部开箱收集内容，再一次性紧凑输出。
+    // 旧实现边走边开边 log，箱多时累计输出超 1000 字符被
+    // getBotOutputSummary 砍中段，AI 看不到完整列表就反复调用。
+    const results = [];
+    for (const positions of containers) {
         const primary = positions[0];
-        // 走到箱子附近才能打开（用任一组成方块都行，取最近的）
         let nearestPos = primary;
         for (const p of positions) {
             if (bot.entity.position.distanceTo(p) < bot.entity.position.distanceTo(nearestPos)) nearestPos = p;
         }
+        let reached = true;
         if (bot.entity.position.distanceTo(nearestPos) > 4) {
             try {
                 await goToPosition(bot, nearestPos.x, nearestPos.y, nearestPos.z, 2);
             } catch (err) {
-                log(bot, `- ${positions.map(posStr).join('|')}：无法到达。`);
-                continue;
+                if (bot.entity.position.distanceTo(nearestPos) > 5) {
+                    results.push({ positions, status: 'unreachable', dist: bot.entity.position.distanceTo(nearestPos) });
+                    continue;
+                }
+                reached = false;
             }
         }
         let items;
@@ -1295,26 +1327,56 @@ export async function viewNearbyChests(bot, range = 32) {
             items = container.containerItems();
             await container.close();
         } catch (err) {
-            log(bot, `- ${positions.map(posStr).join('|')}：打开失败。`);
+            results.push({ positions, status: 'fail', reached });
             continue;
         }
-        // 双联箱子用 | 分隔多个坐标，AI 用任一坐标操作都指向同一容器
-        const label = positions.map(posStr).join('|');
-        if (items.length === 0) {
-            log(bot, `- ${label}：空。`);
-            continue;
-        }
-        // 合并同名物品计数
-        const counts = {};
-        for (const item of items) counts[item.name] = (counts[item.name] || 0) + item.count;
-        // 按数量降序，只列前几种
-        const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-        const shown = entries.slice(0, PER_CHEST_TYPES).map(([n, c]) => `${c} ${n}`).join(', ');
-        const rest = entries.length > PER_CHEST_TYPES ? ` +${entries.length - PER_CHEST_TYPES} 种` : '';
-        log(bot, `- ${label}：${shown}${rest}。`);
+        bot._recordChestMemory?.(positions[0]);
+        results.push({ positions, status: 'ok', items });
     }
-    if (omitted > 0) {
-        log(bot, `（还有 ${omitted} 个箱子未列出，调小 range 或走近些查看。）`);
+
+    // 紧凑输出：坐标用单一最短形式（双联箱只列主坐标），物品最多列 3 种。
+    // 对照记忆标注已知箱子名，让 AI 一眼看出"哪几个还没命名"。
+    const mb = bot._memoryBank;
+    const nameAt = (pos) => {
+        if (!mb) return null;
+        const n = mb.findChestByPos(pos.x, pos.y, pos.z);
+        return n && !n.startsWith('箱子(') ? n : null;
+    };
+    const lines = [`附近 ${range} 格内共 ${containers.length} 个箱子：`];
+    for (const r of results) {
+        const p0 = r.positions[0];
+        const coord = `${p0.x},${p0.y},${p0.z}`;
+        const remembered = nameAt(p0);
+        const tag = remembered ? `[${remembered}]` : '[未命名]';
+        if (r.status === 'unreachable') {
+            lines.push(`- (${coord}) ${tag} 无法到达（${r.dist.toFixed(1)}格）`);
+        } else if (r.status === 'fail') {
+            lines.push(`- (${coord}) ${tag} 打开失败`);
+        } else if (!r.items.length) {
+            lines.push(`- (${coord}) ${tag} 空`);
+        } else {
+            const counts = {};
+            for (const it of r.items) counts[it.name] = (counts[it.name] || 0) + it.count;
+            const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+            const shown = entries.slice(0, 3).map(([n, c]) => `${c} ${n}`).join(',');
+            const rest = entries.length > 3 ? ` +${entries.length - 3}种` : '';
+            lines.push(`- (${coord}) ${tag} ${shown}${rest}`);
+        }
+    }
+    // 一次性输出，控制在 1000 字符内（getBotOutputSummary 截断阈值）。
+    // 若超长则分批 log，确保每批完整可见。
+    let buf = '';
+    for (const line of lines) {
+        if ((buf + line + '\n').length > 900) {
+            log(bot, buf.trimEnd());
+            buf = '';
+        }
+        buf += line + '\n';
+    }
+    if (buf.trim()) log(bot, buf.trimEnd());
+    const unnamed = results.filter(r => r.status === 'ok' && !nameAt(r.positions[0])).length;
+    if (unnamed > 0) {
+        log(bot, `提示：${unnamed} 个箱子还没命名，用 !rememberChest("名字","用途",x,y,z) 记一下用途。`);
     }
     return true;
 }
@@ -2059,6 +2121,10 @@ function startDoorInterval(bot) {
     let lastDoorTime = 0;
     let doorJustOpenedAt = 0; // 最近一次实际开门的时刻，用于跳推前等开启动画结束
     const DOOR_COOLDOWN = 2000;
+    // 触发阈值：主动开门已前置（每 200ms 扫面前关着的门立即开），
+    // 这里只兜底"门已开但 bot 仍卡在门框"的情况，跳推穿门。
+    // 1200ms 足以区分"pathfinder 正在规划"和"真的卡住了"。
+    const STUCK_THRESHOLD = 1200;
 
     function isDoorOpen(block) {
         // 优先用 block states（mineflayer 的 _properties / getProperties()）
@@ -2084,7 +2150,37 @@ function startDoorInterval(bot) {
             stuck_time += now - prev_check;
         }
 
-        if (stuck_time > 1500 && !isResolving) {
+        // 主动开门：检测面前 1-2 格内关着的门，不等卡住立即开。
+        // 这是消除"到门口思考人生"的关键——pathfinder 开门交互时机不稳，
+        // 经常开了门没推 bot 进去就 return，bot 干站着等下面的卡住兜底。
+        if (!isResolving) {
+            const facing = [
+                bot.entity.position.offset(0, 0, 1),
+                bot.entity.position.offset(0, 0, -1),
+                bot.entity.position.offset(1, 0, 0),
+                bot.entity.position.offset(-1, 0, 0),
+                bot.entity.position.offset(0, 1, 1),
+                bot.entity.position.offset(0, 1, -1),
+                bot.entity.position.offset(1, 1, 0),
+                bot.entity.position.offset(-1, 1, 0),
+            ];
+            for (const pos of facing) {
+                const block = bot.blockAt(pos);
+                if (!block || !block.name || block.name.includes('iron')) continue;
+                if (!(block.name.includes('door') || block.name.includes('fence_gate') || block.name.includes('trapdoor'))) continue;
+                const openState = isDoorOpen(block);
+                if (openState === true || openState === null) continue; // 开着或状态不明，不碰
+                // 关着的门：冷却内不重复 activate
+                if (sameDoorPos(block.position, lastDoorPos) && Date.now() - lastDoorTime < DOOR_COOLDOWN) continue;
+                bot.activateBlock(block);
+                lastDoorPos = block.position.clone ? block.position.clone() : { ...block.position };
+                lastDoorTime = Date.now();
+                doorJustOpenedAt = Date.now();
+                break; // 一次只开一扇
+            }
+        }
+
+        if (stuck_time > STUCK_THRESHOLD && !isResolving) {
             isResolving = true;
             stuck_time = 0;
             // shuffle positions so we're not always opening the same door
@@ -2164,11 +2260,15 @@ function startDoorInterval(bot) {
                 // 刚开的门：开启动画还没结束，bot 跳推也穿不过去，反而会
                 // 卡门框。先安静等待 pathfinder 自己走过去；下一轮若仍卡住，
                 // 门动画也结束了，才进入跳推分支。这里只记录、不动作。
+                stuck_time = 0;
+                prev_pos = bot.entity.position.clone();
                 isResolving = false;
             } else if (alreadyOpen) {
                 // 门本来就开着：pathfinder 能正常穿过敞开门洞，无需任何辅助。
                 // 之前的跳推反而把正常经过门的 bot 干扰成"卡着蹭"。直接放行，
                 // 重置 stuck_time 让下一轮检测从零开始，避免反复触发。
+                stuck_time = 0;
+                prev_pos = bot.entity.position.clone();
                 isResolving = false;
             } else {
                 // 门处于冷却中（刚开过、动画可能刚结束但仍卡住）：等开启动画

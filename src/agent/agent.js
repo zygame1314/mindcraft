@@ -70,15 +70,21 @@ export class Agent {
         // 自动把箱子坐标记进 memory_bank（用途留空，待 AI 用 !rememberChest 命名）。
         // 不记具体物品——物品会变，记了就过期；要查内容用 !viewChest 实时看。
         const self = this;
+        this.bot._memoryBank = this.memory_bank; // 供 skills.js 直接读取记忆
         this.bot._recordChestMemory = (position) => {
             try {
                 if (!position) return;
                 const pos = [position.x, position.y, position.z];
+                // findChestByPos 已支持双联箱相邻方块匹配：若该方块（或相邻方块）
+                // 已登记过箱子（占位或命名），不新建占位，避免双联箱两块各记一条。
                 let name = self.memory_bank.findChestByPos(...pos);
                 if (!name) name = `箱子(${pos[0]},${pos[1]},${pos[2]})`;
-                // 已命名的不覆盖用途；新箱子标"用途未知"
-                const exists = self.memory_bank.recallChest(name);
-                self.memory_bank.rememberChest(name, exists?.purpose || '用途未知', pos);
+                if (name.startsWith('箱子(')) {
+                    const exists = self.memory_bank.recallChest(name);
+                    self.memory_bank.rememberChest(name, exists?.purpose || '用途未知', pos);
+                }
+                // 若该坐标已被手动命名（findChestByPos 返回的不是"箱子(...)"格式），
+                // 则不创建占位，保持已命名状态。
             } catch (e) {
                 console.warn('recordChestMemory error:', e.message);
             }

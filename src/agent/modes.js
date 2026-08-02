@@ -142,12 +142,12 @@ const modes_list = [
                 bot.blockAt(_p.offset(0, 0, -1)),
             ];
             const inClimbable = _around.some(_isClimbable);
-            if (inClimbable && bot.pathfinder.goal) {
-                this.stuck_time = 0;
-                this.prev_location = bot.entity.position.clone();
-                this.last_time = Date.now();
-                return;
-            }
+            // 贴梯子/藤蔓时不再无条件重置 stuck_time。
+            // 旧逻辑：inClimbable && goal 存在就 return → 向下梯子时 bot 卡在边缘
+            // 微调不前进，stuck_time 永远 0，永不脱困（"蹭在边缘不提示卡住"）。
+            // 改为：贴攀爬物时仍累计 stuck_time，只是给更长的容忍时间（攀爬本身慢），
+            // 超过 climb_max 才算真卡住。goal 存在时也照累计，因为 goal 在≠在前进。
+            const climb_max = 15; // 攀爬容忍秒数：比平地 20 略短，避免边缘微调耗太久
             if (this.prev_location && this.prev_location.distanceTo(bot.entity.position) < this.distance) {
                 this.stuck_time += (Date.now() - this.last_time) / 1000;
             }
@@ -155,6 +155,11 @@ const modes_list = [
                 this.prev_location = bot.entity.position.clone();
                 this.stuck_time = 0;
                 this.prev_dig_block = null;
+            }
+            // 贴攀爬物且还没卡够 climb_max：记一下位置，正常寻路中，不触发脱困。
+            if (inClimbable && this.stuck_time <= climb_max) {
+                this.last_time = Date.now();
+                return;
             }
             const max_stuck_time = cur_dig_block?.name === 'obsidian' ? this.max_stuck_time * 2 : this.max_stuck_time;
             // 脚下/身处在藤蔓类方块上时，更快判定为卡住（红树林沼泽常见）
@@ -168,14 +173,43 @@ const modes_list = [
                 this.stuck_time = 0;
                 execute(this, agent, async () => {
                     const crashTimeout = setTimeout(() => { agent.cleanKill("卡住了且无法脱困") }, 10000);
-                    // 原版做法：只往后退脱困，不挖方块。
-                    // 旧实现会 bot.dig 周围方块脱困，但 bot.dig 内部会先 stopDigging 打断
-                    // 当前正在挖的目标方块——挖矿时 unstuck 一旦误判触发，就会抢断正在
-                    // 挖的矿，转头去挖"卡路方块"，表现为"挖到一半突然转头乱挖"。
-                    // collectBlock（插件 collectBlock.collect）内部虽会 pause('unstuck')，
-                    // 但 goToCoordinates/goToGoal 到位后、collectBlock 启动前的间隙，
-                    // unstuck 仍可能累计触发。改回原版 moveAway，绝不挖方块，从根上杜绝抢断。
-                    await skills.moveAway(bot, 5);
+                    // 贴梯子/藤蔓卡住（常见：向下梯子入口边缘零位移反复跳）：
+                    // moveAway 会把 bot 推离梯子，pathfinder goal 又把它拉回 → 横跳。
+                    // 改为先尝试主动沿梯子推进：找到最近的攀爬方块，朝它的水平方向 +
+                    // 略微下移方向走 1~2 秒，让 bot 真正"贴上去滑下来"，而不是在边缘蹭。
+                    // 仍不行再 fallback 到 moveAway。
+                    if (inClimbable) {
+                        const me = bot.entity.position.clone();
+                        try {
+                            let target = null, bestD = Infinity;
+                            for (const b of _around) {
+                                if (!b || !climbableNames.includes(b.name)) continue;
+                                const d = me.distanceSquared(b.position);
+                                if (d < bestD) { bestD = d; target = b.position; }
+                            }
+                            if (target) {
+                                const dir = target.minus(me);
+                                // 水平方向走过去 + 蹲下/向前，触发进入梯子
+                                bot.setControlState('forward', true);
+                                bot.setControlState('sprint', false);
+                                bot.setControlState('sneak', true);
+                                // 朝梯子水平分量方向看
+                                if (Math.abs(dir.x) > Math.abs(dir.z)) {
+                                    bot.setControlState(dir.x > 0 ? 'right' : 'left', true);
+                                } else {
+                                    bot.setControlState(dir.z > 0 ? 'back' : 'forward', true);
+                                }
+                                await new Promise(r => setTimeout(r, 1500));
+                                bot.clearControlStates();
+                            }
+                        } catch (_) { }
+                        // 若还在原地，再走 moveAway
+                        if (me.distanceSquared(bot.entity.position) < 1) {
+                            await skills.moveAway(bot, 5);
+                        }
+                    } else {
+                        await skills.moveAway(bot, 5);
+                    }
                     clearTimeout(crashTimeout);
                     say(agent, '我脱困啦！');
                 });
@@ -213,6 +247,13 @@ const modes_list = [
         update: async function (agent) {
             const enemy = world.getNearestEntityWhere(agent.bot, entity => mc.isHostile(entity), 8);
             if (enemy && await world.isClearPath(agent.bot, enemy)) {
+                // 幻翼/会飞的怪在空中，近战 self_defense 打不到，却会无限打断
+                // 其他操作（看箱子、走路、睡觉）形成死循环"成功自卫"刷屏。
+                // 这类怪交给 AI 用弓箭/手动 !attack 处理，self_defense 跳过它。
+                const flyingMobs = ['phantom', 'ghast', 'blaze', 'bee'];
+                if (flyingMobs.includes(enemy.name) && agent.bot.entity.position.distanceTo(enemy.position) > 3) {
+                    return;
+                }
                 say(agent, `正在和${enemy.name}打架！`);
                 execute(this, agent, async () => {
                     await skills.defendSelf(agent.bot, 8);

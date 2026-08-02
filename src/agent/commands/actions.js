@@ -2,6 +2,28 @@ import * as skills from '../library/skills.js';
 import settings from '../settings.js';
 import convoManager from '../conversation.js';
 
+// 把 chest 参数（箱子别名或 x 坐标）解析成 skills 期望的 x/y/z。
+// - chest 为空：返回全 null，skills 用最近箱子。
+// - chest 是数字串（可带负号/小数点）：当作 x 坐标，配 chest_y/chest_z。
+// - chest 是非数字字符串：查 memory_bank 的箱子名/别名，命中返回其坐标。
+// 找不到名字时记一条日志并返回全 null（退回最近箱子），不让命令直接报错崩。
+function resolveChestArg(agent, chest, chest_y, chest_z) {
+    if (chest == null || chest === '') return { x: null, y: null, z: null };
+    // 数字坐标
+    if (/^-?\d+(\.\d+)?$/.test(String(chest).trim())) {
+        return { x: Number(chest), y: chest_y, z: chest_z };
+    }
+    // 箱子别名
+    const mb = agent.memory_bank;
+    const name = mb.resolvePlaceName(chest) || chest;
+    const c = mb.recallChest(name);
+    if (c && c.pos) return { x: c.pos[0], y: c.pos[1], z: c.pos[2] };
+    // 找不到时列出所有已记箱子名，避免 AI 反复盲调 !viewNearbyChests 想确认
+    const known = mb.getChestKeys();
+    skills.log(agent.bot, `没记住过叫 "${chest}" 的箱子。已记的箱子：${known || '（无）'}。用 !viewNearbyChests 看附近实物箱子。`);
+    return { notFound: true };
+}
+
 
 function runAsAction (actionFn, resume = false, timeout = -1) {
     let actionLabel = null;  // Will be set on first use
@@ -28,7 +50,7 @@ function runAsAction (actionFn, resume = false, timeout = -1) {
 export const actionsList = [
     {
         name: '!newAction',
-        description: 'Perform new and unknown custom behaviors that are not available as a command.', 
+        description: 'Write and run custom JavaScript code for tasks the built-in commands cannot do directly. Prefer this whenever a task needs MULTIPLE steps, loops, conditions, combining several commands, or tracking state across actions. Examples: "collect 20 wood then craft them into planks", "fish until inventory is full", "mine downward until hitting lava", "smelt all raw_iron in inventory". A single simple action (just go somewhere / collect one thing / craft once) should still use the dedicated command instead. Inside the code you call skills/world functions directly (e.g. skills.collectBlock(bot, "oak_log", 5)) and use log(bot, msg) to report progress; the prompt you pass should be a detailed step-by-step plan.', 
         params: {
             'prompt': { type: 'string', description: 'A natural language prompt to guide code generation. Make a detailed step-by-step plan.' }
         },
@@ -174,7 +196,7 @@ export const actionsList = [
         name: '!goToRememberedPlace',
         description: 'Go to a saved location.',
         params: {'name': { type: 'string', description: 'The name of the location to go to.' }},
-        perform: async function (agent, name) {
+        perform: runAsAction(async (agent, name) => {
             const resolved = agent.memory_bank.resolvePlaceName(name);
             if (!resolved) {
                 skills.log(agent.bot, `没找到叫 "${name}" 的地点。用 !savedPlaces 看全部已记地点。`);
@@ -186,7 +208,7 @@ export const actionsList = [
                 return;
             }
             await skills.goToPosition(agent.bot, pos[0], pos[1], pos[2], 1);
-        }
+        })
     },
     {
         name: '!givePlayer',
@@ -218,47 +240,53 @@ export const actionsList = [
     },
     {
         name: '!putInChest',
-        description: 'Put the given item in a chest. By default the nearest chest; pass chest x/y/z to target a specific chest identified by !viewNearbyChests.',
+        description: '把物品放进箱子。可用箱子名字（!rememberChest 记过的）或坐标。例：!putInChest("coal",2,"矿物箱") 或 !putInChest("coal",2,-694,60,-235)。不传箱子名/坐标则用最近的箱子。',
         params: {
-            'item_name': { type: 'ItemName', description: 'The name of the item to put in the chest.' },
-            'num': { type: 'int', description: 'The number of items to put in the chest.', domain: [1, Number.MAX_SAFE_INTEGER] },
-            'chest_x': { type: 'int', description: 'The x coordinate of the target chest. Omit to use the nearest chest.', optional: true, domain: [-Infinity, Infinity] },
-            'chest_y': { type: 'int', description: 'The y coordinate of the target chest. Omit to use the nearest chest.', optional: true, domain: [-64, 320] },
-            'chest_z': { type: 'int', description: 'The z coordinate of the target chest. Omit to use the nearest chest.', optional: true, domain: [-Infinity, Infinity] }
+            'item_name': { type: 'ItemName', description: '要放的物品名。' },
+            'num': { type: 'int', description: '数量。', domain: [1, Number.MAX_SAFE_INTEGER] },
+            'chest': { type: 'string', description: '箱子别名（如"矿物箱"）或 x 坐标。省略用最近箱子。', optional: true },
+            'chest_y': { type: 'int', description: 'y 坐标（传了 chest 且是数字时用）。', optional: true, domain: [-64, 320] },
+            'chest_z': { type: 'int', description: 'z 坐标。', optional: true, domain: [-Infinity, Infinity] }
         },
-        perform: runAsAction(async (agent, item_name, num, chest_x, chest_y, chest_z) => {
-            await skills.putInChest(agent.bot, item_name, num, chest_x, chest_y, chest_z);
+        perform: runAsAction(async (agent, item_name, num, chest, chest_y, chest_z) => {
+            const r = resolveChestArg(agent, chest, chest_y, chest_z);
+            if (r.notFound) return;
+            await skills.putInChest(agent.bot, item_name, num, r.x, r.y, r.z);
         })
     },
     {
         name: '!takeFromChest',
-        description: 'Take the given items from a chest. By default the nearest chest; pass chest x/y/z to target a specific chest identified by !viewNearbyChests.',
+        description: '从箱子取物品。可用箱子名字或坐标。例：!takeFromChest("iron_ingot",4,"矿物箱") 或 !takeFromChest("iron_ingot",4,-694,60,-235)。',
         params: {
-            'item_name': { type: 'ItemName', description: 'The name of the item to take.' },
-            'num': { type: 'int', description: 'The number of items to take.', domain: [1, Number.MAX_SAFE_INTEGER] },
-            'chest_x': { type: 'int', description: 'The x coordinate of the target chest. Omit to use the nearest chest.', optional: true, domain: [-Infinity, Infinity] },
-            'chest_y': { type: 'int', description: 'The y coordinate of the target chest. Omit to use the nearest chest.', optional: true, domain: [-64, 320] },
-            'chest_z': { type: 'int', description: 'The z coordinate of the target chest. Omit to use the nearest chest.', optional: true, domain: [-Infinity, Infinity] }
+            'item_name': { type: 'ItemName', description: '要取的物品名。' },
+            'num': { type: 'int', description: '数量。', domain: [1, Number.MAX_SAFE_INTEGER] },
+            'chest': { type: 'string', description: '箱子别名或 x 坐标。省略用最近箱子。', optional: true },
+            'chest_y': { type: 'int', description: 'y 坐标。', optional: true, domain: [-64, 320] },
+            'chest_z': { type: 'int', description: 'z 坐标。', optional: true, domain: [-Infinity, Infinity] }
         },
-        perform: runAsAction(async (agent, item_name, num, chest_x, chest_y, chest_z) => {
-            await skills.takeFromChest(agent.bot, item_name, num, chest_x, chest_y, chest_z);
+        perform: runAsAction(async (agent, item_name, num, chest, chest_y, chest_z) => {
+            const r = resolveChestArg(agent, chest, chest_y, chest_z);
+            if (r.notFound) return;
+            await skills.takeFromChest(agent.bot, item_name, num, r.x, r.y, r.z);
         })
     },
     {
         name: '!viewChest',
-        description: 'View the items/counts of a chest. By default the nearest chest; pass chest x/y/z to target a specific chest identified by !viewNearbyChests.',
+        description: '看箱子内容。可用箱子名字或坐标。例：!viewChest("矿物箱") 或 !viewChest(-694,60,-235)。不传则看最近箱子。',
         params: {
-            'chest_x': { type: 'int', description: 'The x coordinate of the target chest. Omit to view the nearest chest.', optional: true, domain: [-Infinity, Infinity] },
-            'chest_y': { type: 'int', description: 'The y coordinate of the target chest. Omit to view the nearest chest.', optional: true, domain: [-64, 320] },
-            'chest_z': { type: 'int', description: 'The z coordinate of the target chest. Omit to view the nearest chest.', optional: true, domain: [-Infinity, Infinity] }
+            'chest': { type: 'string', description: '箱子别名或 x 坐标。省略看最近箱子。', optional: true },
+            'chest_y': { type: 'int', description: 'y 坐标。', optional: true, domain: [-64, 320] },
+            'chest_z': { type: 'int', description: 'z 坐标。', optional: true, domain: [-Infinity, Infinity] }
         },
-        perform: runAsAction(async (agent, chest_x, chest_y, chest_z) => {
-            await skills.viewChest(agent.bot, chest_x, chest_y, chest_z);
+        perform: runAsAction(async (agent, chest, chest_y, chest_z) => {
+            const r = resolveChestArg(agent, chest, chest_y, chest_z);
+            if (r.notFound) return;
+            await skills.viewChest(agent.bot, r.x, r.y, r.z);
         })
     },
     {
         name: '!viewNearbyChests',
-        description: 'List all chests within range with their coordinates and contents. Use this to tell multiple chests apart, then target a specific chest with !viewChest/!putInChest/!takeFromChest using its x/y/z.',
+        description: '列出附近所有箱子的坐标和内容，并标注已记忆的箱子名（[矿物箱]）和未命名的（[未命名]）。用这个一次看清所有箱子，再用坐标或别名操作 !viewChest/!putInChest/!takeFromChest。',
         params: {
             'range': { type: 'int', description: 'The search radius in blocks. Defaults to 32.', optional: true, domain: [1, 128], default: 32 }
         },
@@ -555,22 +583,33 @@ export const actionsList = [
     },
     {
         name: '!rememberChest',
-        description: '给箱子记个别名+用途，之后靠用途找箱子，不记具体物品（物品会变，要看用 !viewChest）。例：!rememberChest("矿物箱","存挖到的矿石和锭")',
+        description: '给箱子记个别名+用途，之后靠用途找箱子，不记具体物品（物品会变，要看用 !viewChest）。例：!rememberChest("矿物箱","存挖到的矿石和锭")。可用坐标精确指定：!rememberChest("矿物箱","存矿石",-689,60,-236)',
         params: {
             'name': { type: 'string', description: '箱子别名，例如 "矿物箱"、"食物箱"。' },
-            'purpose': { type: 'string', description: '这个箱子干啥用的，例如 "存挖到的矿石"、"放食物和农作物"。' }
+            'purpose': { type: 'string', description: '这个箱子干啥用的，例如 "存挖到的矿石"、"放食物和农作物"。' },
+            'chest_x': { type: 'int', description: '目标箱子 x 坐标，省略则用最近箱子（5 格内）。', optional: true, domain: [-Infinity, Infinity] },
+            'chest_y': { type: 'int', description: '目标箱子 y 坐标。', optional: true, domain: [-64, 320] },
+            'chest_z': { type: 'int', description: '目标箱子 z 坐标。', optional: true, domain: [-Infinity, Infinity] }
         },
-        perform: async function (agent, name, purpose) {
+        perform: runAsAction(async (agent, name, purpose, chest_x, chest_y, chest_z) => {
             const bot = agent.bot;
-            const chest = await skills._resolveChestForMemory(bot);
+            // 传坐标：按坐标精确匹配（与 !viewChest 一致，range=32）。
+            // 不传：收窄到 5 格内取最近，避免并排箱子总记到同一个。
+            const range = (chest_x != null) ? 32 : 5;
+            const chest = await skills._resolveChestForMemory(bot, chest_x, chest_y, chest_z, range);
             if (!chest) {
                 skills.log(bot, '附近没有箱子可记录。');
                 return;
             }
             const pos = [chest.position.x, chest.position.y, chest.position.z];
+            // 先查该坐标是否已有命名箱子，告知 AI 是"重命名"还是"新记"
+            const oldName = agent.memory_bank.findChestByPos(...pos);
+            const isReassign = oldName && oldName !== name && !oldName.startsWith('箱子(');
             agent.memory_bank.rememberChest(name, purpose || '', pos);
-            return `已记住箱子 "${name}" 于 (${pos[0]}, ${pos[1]}, ${pos[2]})，用途：${purpose || '未填'}。要看内容用 !viewChest。`;
-        }
+            let msg = `已记住箱子 "${name}" 于 (${pos[0]}, ${pos[1]}, ${pos[2]})，用途：${purpose || '未填'}。要看内容用 !viewChest。`;
+            if (isReassign) msg += `（该坐标原记为 "${oldName}"，已覆盖，勿重复记录同一箱子。）`;
+            skills.log(bot, msg);
+        })
     },
     {
         name: '!recallChest',
