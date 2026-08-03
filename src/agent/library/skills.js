@@ -2303,13 +2303,6 @@ export async function goToGoal(bot, goal) {
         const id = mc.getBlockId(name);
         if (id != null) destructiveMovements.blocksCantBreak.add(id);
     }
-    // 提高 1x1 tower（原地放方块+跳上去）的代价：深坑脱困时 pathfinder 默认
-    // placeCost=1 太便宜，会优先选"原地搭方块上去"而不是"走旁边现成的 1 格台阶"。
-    // 但原地搭方块要 jump 到方块上才成功，bot 放了方块没跳上去时 monitorMovement
-    // 不会判失败、只反复重试同一动作，lastNodeTime 要等 3500ms 才判 stuck 重规划，
-    // 重规划又选同样的 tower move → 死循环卡很久。提高 placeCost 让它优先走现成台阶，
-    // 真无路可走时才会用 tower。
-    destructiveMovements.placeCost = 6;
 
     let final_movements = destructiveMovements;
 

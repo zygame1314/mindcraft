@@ -1,5 +1,5 @@
 diff --git a/node_modules/mineflayer-pathfinder/index.js b/node_modules/mineflayer-pathfinder/index.js
-index b38bd30..86d3976 100644
+index b38bd30..a98f770 100644
 --- a/node_modules/mineflayer-pathfinder/index.js
 +++ b/node_modules/mineflayer-pathfinder/index.js
 @@ -14,6 +14,7 @@ const interactableBlocks = require('./lib/interactable.json')
@@ -10,7 +10,15 @@ index b38bd30..86d3976 100644
    const ladderId = bot.registry.blocksByName.ladder.id
    const vineId = bot.registry.blocksByName.vine.id
    let stateMovements = new Movements(bot)
-@@ -61,6 +62,10 @@ function inject (bot) {
+@@ -29,6 +30,7 @@ function inject (bot) {
+   let lastNodeTime = performance.now()
+   let returningPos = null
+   let stopPathing = false
++  let doorOpenedAt = 0 // 开门时间戳，开门后短暂数 tick 内不让 forward，等门动画/碰撞体更新
+   const physics = new Physics(bot)
+   const lockPlaceBlock = new Lock()
+   const lockEquipItem = new Lock()
+@@ -61,6 +63,10 @@ function inject (bot) {
    }
  
    bot.pathfinder.getPathTo = (movements, goal, timeout) => {
@@ -21,7 +29,15 @@ index b38bd30..86d3976 100644
      const generator = bot.pathfinder.getPathFromTo(movements, bot.entity.position, goal, { timeout })
      const { value: { result, astarContext: context } } = generator.next()
      astarContext = context
-@@ -170,6 +175,16 @@ function inject (bot) {
+@@ -131,6 +137,7 @@ function inject (bot) {
+     placing = false
+     pathUpdated = false
+     astarContext = null
++    doorOpenedAt = 0
+     lockEquipItem.release()
+     lockPlaceBlock.release()
+     lockUseBlock.release()
+@@ -170,6 +177,16 @@ function inject (bot) {
        const curPoint = path[i]
        if (curPoint.toBreak.length > 0 || curPoint.toPlace.length > 0) break
        const b = bot.blockAt(new Vec3(curPoint.x, curPoint.y, curPoint.z))
@@ -38,17 +54,48 @@ index b38bd30..86d3976 100644
        if (b && (b.type === waterType || ((b.type === ladderId || b.type === vineId) && i + 1 < path.length && path[i + 1].y < curPoint.y))) {
          curPoint.x = Math.floor(curPoint.x) + 0.5
          curPoint.y = Math.floor(curPoint.y)
-@@ -524,6 +539,9 @@ function inject (bot) {
-         bot.activateBlock(bot.blockAt(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z))).then(() => {
+@@ -417,6 +434,14 @@ function inject (bot) {
+   })
+ 
+   function monitorMovement () {
++    // 门刚打开时的冷却：门开关有动画（约 0.5s），碰撞体不是瞬间消失。开门后
++    // 若干 tick 内停止 forward，等动画播完、碰撞体更新，避免 bot 撞上半开的门卡住。
++    if (doorOpenedAt > 0 && performance.now() - doorOpenedAt < 600) {
++      bot.setControlState('forward', false)
++      bot.setControlState('sprint', false)
++      bot.setControlState('jump', false)
++      return
++    }
+     // Test freemotion
+     if (stateMovements && stateMovements.allowFreeMotion && stateGoal && stateGoal.entity) {
+       const target = stateGoal.entity
+@@ -521,12 +546,24 @@ function inject (bot) {
+       // Open gates or doors
+       if (placingBlock?.useOne) {
+         if (!lockUseBlock.tryAcquire()) return
+-        bot.activateBlock(bot.blockAt(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z))).then(() => {
++        // 重置节点计时：开门有动画耗时，不应计入 stuck 判定（否则 3500ms
++        // 到时会被 resetPath 打断，门还没开完就重新规划，又选同一条路 → 卡门循环）。
++        lastNodeTime = performance.now()
++        const doorBlock = bot.blockAt(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z))
++        bot.activateBlock(doorBlock).then(() => {
            lockUseBlock.release()
            placingBlock = nextPoint.toPlace.shift()
 +          if (!placingBlock) {
 +            placing = false
 +          }
++          // 记录开门时间，monitorMovement 开头的冷却会等动画播完再放行 forward
++          doorOpenedAt = performance.now()
          }, err => {
            console.error(err)
            lockUseBlock.release()
-@@ -550,6 +568,7 @@ function inject (bot) {
++          // 开门失败也要推进，否则永远卡在 placing 分支
++          placingBlock = nextPoint.toPlace.shift()
++          if (!placingBlock) placing = false
+         })
+         return
+       }
+@@ -550,6 +587,7 @@ function inject (bot) {
              lockEquipItem.release()
              const refBlock = bot.blockAt(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z), false)
              if (!lockPlaceBlock.tryAcquire()) return
@@ -56,7 +103,7 @@ index b38bd30..86d3976 100644
              if (interactableBlocks.includes(refBlock.name)) {
                bot.setControlState('sneak', true)
              }
-@@ -557,6 +576,7 @@ function inject (bot) {
+@@ -557,6 +595,7 @@ function inject (bot) {
                .then(function () {
                  // Dont release Sneak if the block placement was not successful
                  bot.setControlState('sneak', false)
@@ -64,7 +111,7 @@ index b38bd30..86d3976 100644
                  if (bot.pathfinder.LOSWhenPlacingBlocks && placingBlock.returnPos) returningPos = placingBlock.returnPos.clone()
                })
                .catch(_ignoreError => {
-@@ -576,7 +596,66 @@ function inject (bot) {
+@@ -576,7 +615,61 @@ function inject (bot) {
      let dx = nextPoint.x - p.x
      const dy = nextPoint.y - p.y
      let dz = nextPoint.z - p.z
@@ -75,13 +122,15 @@ index b38bd30..86d3976 100644
 +    // 朝向退化且通常不对着墙；配合下面 dy<1 的宽松到达判定，bot 还没真正爬到
 +    // 上一格就被判"到达"并 shift 路径，下一节点更高，canStraightLine 失败走到
 +    // else 分支把 forward 关掉，bot 在梯子上失去推进 → 下滑 → 重新规划 → 反复
-+    // "爬一点又滑下"。修法：bot 在攀爬物里且目标在上方时，手动接管——朝梯子所
-+    // 贴的墙体方向持续 forward（梯子上跳跃只会脱离碰撞体没用），到达判定收紧
-+    // 到真正接近节点 y 才 shift。若下一节点已不是攀爬物（到顶要踏出去），改为
-+    // 朝离开墙的方向 forward + sneak，走上顶面平台而不是直直升空。
++    // "爬一点又滑下"。修法：bot 脚踩在攀爬物里时一律朝所贴墙体方向持续 forward
++    // 推进（梯子上跳跃只会脱离碰撞体没用，只靠推进贴墙向上爬），绝不提前转向
++    // 平台——一旦在梯子里转向就会脱离梯子碰撞体掉落。只有 bot 真正爬出梯子
++    // （脚下不再是攀爬物、已踩上平台）才交回原版逻辑，那时 dy≈0、canStraightLine
++    // 能过，自然走上去。到达判定收紧到 dy<=0.25，避免提前 shift。
 +    {
 +      const _feetBlock = bot.blockAt(p.floored())
-+      if (_feetBlock && stateMovements.climbables.has(_feetBlock.type) && dy > 0.2) {
++      const _feetClimbable = _feetBlock && stateMovements.climbables.has(_feetBlock.type)
++      if (_feetClimbable) {
 +        // 找墙体：攀爬物周围 boundingBox==='block' 的最近方块（即所贴的墙）
 +        let _wx = 0, _wz = 0, _wallBest = -1
 +        const _nbBase = p.floored()
@@ -92,23 +141,16 @@ index b38bd30..86d3976 100644
 +            if (_wallBest < 0 || _d < _wallBest) { _wallBest = _d; _wx = _ax; _wz = _az }
 +          }
 +        }
-+        const _nextBlock = bot.blockAt(new Vec3(nextPoint.x, nextPoint.y, nextPoint.z))
-+        const _nextIsClimbable = _nextBlock && stateMovements.climbables.has(_nextBlock.type)
++        // 脚在攀爬物里：始终朝墙看 + forward 贴墙爬，不跳、不潜行、不转向平台
 +        if (_wallBest >= 0) {
-+          if (_nextIsClimbable) {
-+            // 上面还有一格攀爬物：朝墙看，forward 推进 = 向上爬
-+            bot.look(Math.atan2(-_wx, -_wz), 0)
-+          } else {
-+            // 到顶了，下一节点不是攀爬物：朝离开墙的方向走出去踏上平台
-+            bot.look(Math.atan2(_wx, _wz), 0)
-+          }
++          bot.look(Math.atan2(-_wx, -_wz), 0)
 +        }
 +        bot.setControlState('forward', true)
-+        bot.setControlState('jump', false) // 梯子上跳跃没用，只能推进
++        bot.setControlState('jump', false)
 +        bot.setControlState('sprint', false)
-+        bot.setControlState('sneak', _nextIsClimbable ? false : true) // 出梯时 sneak 防止踩空前掉回井里
-+        // 收紧到达判定：bot 真正爬到节点 y 附近才 shift，避免提前换节点导致 forward 被关
-+        if (Math.abs(dx) <= 0.3 && Math.abs(dz) <= 0.3 && dy <= 0.25) {
++        bot.setControlState('sneak', false)
++        // 收紧到达判定：bot 真正爬到节点 y 附近才 shift
++        if (Math.abs(dx) <= 0.3 && Math.abs(dz) <= 0.3 && Math.abs(dy) <= 0.25) {
 +          lastNodeTime = performance.now()
 +          if (stopPathing) { stop(); return }
 +          path.shift()
@@ -121,7 +163,7 @@ index b38bd30..86d3976 100644
 +            return
 +          }
 +        }
-+        if (performance.now() - lastNodeTime > 3500) {
++        if (performance.now() - lastNodeTime > 4000) {
 +          resetPath('stuck_climb')
 +        }
 +        return
@@ -132,7 +174,7 @@ index b38bd30..86d3976 100644
        // arrived at next point
        lastNodeTime = performance.now()
        if (stopPathing) {
-@@ -611,6 +690,9 @@ function inject (bot) {
+@@ -611,6 +704,9 @@ function inject (bot) {
      if (bot.entity.isInWater) {
        bot.setControlState('jump', true)
        bot.setControlState('sprint', false)
@@ -142,7 +184,7 @@ index b38bd30..86d3976 100644
      } else if (stateMovements.allowSprinting && physics.canStraightLine(path, true)) {
        bot.setControlState('jump', false)
        bot.setControlState('sprint', true)
-@@ -631,7 +713,12 @@ function inject (bot) {
+@@ -631,7 +727,12 @@ function inject (bot) {
      // check for futility
      if (performance.now() - lastNodeTime > 3500) {
        // should never take this long to go to the next node
@@ -157,7 +199,7 @@ index b38bd30..86d3976 100644
    }
  }
 diff --git a/node_modules/mineflayer-pathfinder/lib/movements.js b/node_modules/mineflayer-pathfinder/lib/movements.js
-index a7e3505..84a0841 100644
+index a7e3505..3ae7193 100644
 --- a/node_modules/mineflayer-pathfinder/lib/movements.js
 +++ b/node_modules/mineflayer-pathfinder/lib/movements.js
 @@ -50,7 +50,12 @@ class Movements {
@@ -242,18 +284,33 @@ index a7e3505..84a0841 100644
      if (!this.safeToBreak(block)) return 100 // Can't break, so can't move
      toBreak.push(block.position)
  
-@@ -387,8 +417,8 @@ class Movements {
+@@ -387,9 +417,23 @@ class Movements {
      cost += this.safeOrBreak(blockB, toBreak)
      if (cost > 100) return
  
 -    // Open fence gates
 -    if (this.canOpenDoors && blockC.openable && blockC.shapes && blockC.shapes.length !== 0) {
 +    // Open fence gates and doors
++    // 双开门（oak_door 等）放置后拆成 half=lower（blockC，脚部）和 half=upper
++    // （blockB，头部）两半，type 相同都 openable。activateBlock 下半门时游戏会
++    // 联动开上半，所以只对 blockC push 一个 useOne 即可。但 blockB（上半门）
++    // 关闭时 boundingBox 不是 'empty'，上面 safeOrBreak 会把它当障碍加入 toBreak
++    // → bot 去挖门上半而非开门。这里若 blockB 也是 openable 门就跳过破坏（等
++    // 下半门被 useOne 打开后上半联动开，碰撞消失）。
 +    if (this.canOpenDoors && blockC.openable && !blockC._properties.open) {
        toPlace.push({ x: node.x + dir.x, y: node.y, z: node.z + dir.z, dx: 0, dy: 0, dz: 0, useOne: true }) // Indicate that a block should be used on this block not placed
++      // 上半门联动开，无需破坏；从 toBreak 里移除上半门位置
++      if (blockB.openable) {
++        for (let i = toBreak.length - 1; i >= 0; i--) {
++          if (toBreak[i].x === blockB.position.x && toBreak[i].y === blockB.position.y && toBreak[i].z === blockB.position.z) {
++            toBreak.splice(i, 1)
++          }
++        }
++      }
      } else {
        cost += this.safeOrBreak(blockC, toBreak)
-@@ -554,6 +584,54 @@ class Movements {
+       if (cost > 100) return
+@@ -554,6 +598,54 @@ class Movements {
      neighbors.push(new Move(node.x, node.y + 1, node.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
    }
  
@@ -308,7 +365,7 @@ index a7e3505..84a0841 100644
    // Jump up, down or forward over a 1 block gap
    getMoveParkourForward (node, dir, neighbors) {
      const block0 = this.getBlock(node, 0, -1, 0)
-@@ -656,8 +734,27 @@ class Movements {
+@@ -656,8 +748,27 @@ class Movements {
      this.getMoveDown(node, neighbors)
      this.getMoveUp(node, neighbors)
  
@@ -336,3 +393,22 @@ index a7e3505..84a0841 100644
  }
  
  module.exports = Movements
+diff --git a/node_modules/mineflayer-pathfinder/lib/physics.js b/node_modules/mineflayer-pathfinder/lib/physics.js
+index ef9e389..b283c79 100644
+--- a/node_modules/mineflayer-pathfinder/lib/physics.js
++++ b/node_modules/mineflayer-pathfinder/lib/physics.js
+@@ -103,7 +103,13 @@ class Physics {
+   getReached (path) {
+     return (state) => {
+       const delta = path[0].minus(state.pos)
+-      return Math.abs(delta.x) <= 0.35 && Math.abs(delta.z) <= 0.35 && Math.abs(delta.y) < 1
++      // 原 |delta.y| < 1 过松：bot 被前方 2 格高墙挡住时水平不前进，但跳跃使 y
++      // 升高约 0.5-0.9，此时 delta.y 绝对值 < 1 → 误判"到达" → canWalkJump 返回
++      // true → monitorMovement 设 jump=true 对墙原地跳，落地又跳，反复直到卡住。
++      // 收紧到 |delta.y| < 0.3，且要求水平位移已接近目标（避免"跳了但没走过去"
++      // 的假到达）。只有真正平移到节点附近才算到达，纯垂直跳动不算。
++      if (Math.abs(delta.x) > 0.35 || Math.abs(delta.z) > 0.35) return false
++      return Math.abs(delta.y) < 0.3
+     }
+   }
+ 
