@@ -1260,10 +1260,13 @@ export async function viewNearbyChests(bot, range = 32) {
     chests.sort((a, b) => bot.entity.position.distanceSquared(a.position) - bot.entity.position.distanceSquared(b.position));
 
     // 合并双联箱子：Minecraft 的大型箱子是两个相邻方块共用一个 54 格容器，
-    // findBlocks 会返回两个位置、各自打开内容完全相同。靠方块 type 属性
-    // （single/left/right）+ 相邻判定合并：非 single 且与另一箱子相邻（且朝向匹配）
-    // 则视为同一容器。为版本兼容，也接受单纯相邻（曼哈顿距离=1）的箱子合并。
-    // 合并后每个容器记录所有组成方块坐标，输出时全部列出，AI 用任一坐标都能命中。
+    // findBlocks 会返回两个位置、各自打开内容完全相同。
+    // 判定规则（严格，避免把并排两排独立箱子误合并）：
+    //   - type 属性可读：left 只配 right，right 只配 left，single 不配对。
+    //     （并排两排双联箱时，外排 left 和里排 left 也相邻，但 left+left 不是双联箱，
+    //      旧实现"非 single + 相邻即合并"会把它们误并，导致里排箱子消失。）
+    //   - type 读不到：fallback 到"打开看内容是否完全相同"。纯相邻判定太宽，
+    //     z 方向并排的两排单箱也会被误并。内容比对最可靠但慢，只在 type 不可用时用。
     const seen = new Set();
     const containers = [];
     const key = p => `${p.x},${p.y},${p.z}`;
@@ -1271,29 +1274,61 @@ export async function viewNearbyChests(bot, range = 32) {
     const chestType = b => {
         try { return b._properties?.type; } catch (_) { return undefined; }
     };
+    // 内容指纹：打开箱子取物品列表签名。用于 type 不可读时的双联箱判定。
+    const contentSig = async (bot, pos) => {
+        try {
+            const c = await bot.openContainer(bot.blockAt(pos));
+            const items = c.containerItems();
+            await c.close();
+            const counts = {};
+            for (const it of items) counts[it.name] = (counts[it.name] || 0) + it.count;
+            return Object.entries(counts).sort().map(([n, c]) => `${n}:${c}`).join(',');
+        } catch (_) { return null; }
+    };
+
     for (const chest of chests) {
         if (seen.has(key(chest.position))) continue;
         const positions = [chest.position];
         seen.add(key(chest.position));
         const t = chestType(chest);
-        // 合并双联箱子：
-        // - type 属性可读且非 single：找相邻且 type 也非 single 的配对方块合并。
-        // - type 读不到（undefined/null，旧版本/某些箱子）：fallback 到"单纯相邻即合并"，
-        //   找任意相邻箱子方块合并。注释原本就说"为版本兼容也接受单纯相邻"，
-        //   但旧实现 `t && t !== 'single'` 在 type 读不到时直接跳过了合并，
-        //   导致 x 方向相邻的双联箱子（内容相同）被拆成两条输出。
-        const canPairByType = t && t !== 'single';
+        const canPairByType = t && t !== 'single'; // left 或 right
         for (const other of chests) {
             if (seen.has(key(other.position))) continue;
             const ot = chestType(other);
             if (!isAdjacent(chest.position, other.position)) continue;
-            const match = canPairByType
-                ? (ot && ot !== 'single')
-                : true; // type 读不到：相邻即合并
+            let match = false;
+            if (canPairByType) {
+                // 严格配对：left 配 right，right 配 left
+                match = (t === 'left' && ot === 'right') || (t === 'right' && ot === 'left');
+            } else if (!t && !ot) {
+                // type 都读不到：标记待定，先不合并，后面用内容比对
+                match = false; // 这里先不合并，下面 fallback 处理
+            }
+            // single + 任何，或 left+left 等：不合并
             if (match) {
                 positions.push(other.position);
                 seen.add(key(other.position));
                 break;
+            }
+        }
+        // type 读不到且没通过 type 合并：尝试用内容比对找双联箱另一半
+        // （只在当前箱子还没配对时做，避免对每个单箱都开箱，太慢）
+        if (positions.length === 1 && !t) {
+            for (const other of chests) {
+                if (seen.has(key(other.position))) continue;
+                if (!isAdjacent(chest.position, other.position)) continue;
+                const ot2 = chestType(other);
+                if (ot2 && ot2 !== 'single') continue; // 对方有 type 且非 single，交给 type 逻辑
+                // 内容比对
+                const [s1, s2] = await Promise.all([
+                    contentSig(bot, chest.position),
+                    contentSig(bot, other.position),
+                ]);
+                if (s1 !== null && s1 === s2) {
+                    positions.push(other.position);
+                    seen.add(key(other.position));
+                    break;
+                }
             }
         }
         containers.push(positions);
@@ -1302,23 +1337,27 @@ export async function viewNearbyChests(bot, range = 32) {
     // 两阶段：先全部开箱收集内容，再一次性紧凑输出。
     // 旧实现边走边开边 log，箱多时累计输出超 1000 字符被
     // getBotOutputSummary 砍中段，AI 看不到完整列表就反复调用。
+    // 走路用静默 pathfinder（不调 goToPosition，避免"找到了非破坏性路径/已到达"
+    // 等导航日志 19 个箱子刷出 ~38 行废话，挤掉箱子列表）。
+    const quietGoto = async (x, y, z) => {
+        const goal = new pf.goals.GoalNear(x, y, z, 2);
+        const move = new pf.Movements(bot);
+        move.canDig = false;
+        bot.pathfinder.setMovements(move);
+        await bot.pathfinder.goto(goal);
+    };
     const results = [];
     for (const positions of containers) {
-        const primary = positions[0];
-        let nearestPos = primary;
+        let nearestPos = positions[0];
         for (const p of positions) {
             if (bot.entity.position.distanceTo(p) < bot.entity.position.distanceTo(nearestPos)) nearestPos = p;
         }
-        let reached = true;
+        // 已在交互距离内（~4.5格）就不走，避免不必要导航
         if (bot.entity.position.distanceTo(nearestPos) > 4) {
             try {
-                await goToPosition(bot, nearestPos.x, nearestPos.y, nearestPos.z, 2);
-            } catch (err) {
-                if (bot.entity.position.distanceTo(nearestPos) > 5) {
-                    results.push({ positions, status: 'unreachable', dist: bot.entity.position.distanceTo(nearestPos) });
-                    continue;
-                }
-                reached = false;
+                await quietGoto(nearestPos.x, nearestPos.y, nearestPos.z);
+            } catch (_) {
+                // 走不到位但可能已在交互距离内，下面仍尝试开箱
             }
         }
         let items;
@@ -1327,10 +1366,11 @@ export async function viewNearbyChests(bot, range = 32) {
             items = container.containerItems();
             await container.close();
         } catch (err) {
-            results.push({ positions, status: 'fail', reached });
+            const dist = bot.entity.position.distanceTo(nearestPos);
+            results.push({ positions, status: dist > 5 ? 'unreachable' : 'fail', dist });
             continue;
         }
-        bot._recordChestMemory?.(positions[0]);
+        bot._recordChestMemory?.(positions);
         results.push({ positions, status: 'ok', items });
     }
 
@@ -1345,8 +1385,18 @@ export async function viewNearbyChests(bot, range = 32) {
     const lines = [`附近 ${range} 格内共 ${containers.length} 个箱子：`];
     for (const r of results) {
         const p0 = r.positions[0];
-        const coord = `${p0.x},${p0.y},${p0.z}`;
-        const remembered = nameAt(p0);
+        // 双联箱只列一个坐标（离 bot 最近的组成方块），避免 AI 在两个坐标间纠结
+        let dispPos = p0;
+        for (const p of r.positions) {
+            if (bot.entity.position.distanceTo(p) < bot.entity.position.distanceTo(dispPos)) dispPos = p;
+        }
+        const coord = `${dispPos.x},${dispPos.y},${dispPos.z}`;
+        // 双联箱用任一组成方块坐标查记忆，AI 之前可能记的是另一半
+        let remembered = null;
+        for (const p of r.positions) {
+            const n = nameAt(p);
+            if (n) { remembered = n; break; }
+        }
         const tag = remembered ? `[${remembered}]` : '[未命名]';
         if (r.status === 'unreachable') {
             lines.push(`- (${coord}) ${tag} 无法到达（${r.dist.toFixed(1)}格）`);
@@ -2087,245 +2137,13 @@ export async function goToGoal(bot, goal) {
         log(bot, `未找到路径，但尝试使用破坏性移动继续导航。`);
     }
 
-    const doorCheckInterval = startDoorInterval(bot);
-
     bot.pathfinder.setMovements(final_movements);
-    try {
-        await bot.pathfinder.goto(goal);
-        clearInterval(doorCheckInterval);
-        return true;
-    } catch (err) {
-        clearInterval(doorCheckInterval);
-        // we need to catch so we can clean up the door check interval, then rethrow the error
-        throw err;
-    }
-}
-
-let _doorInterval = null;
-function startDoorInterval(bot) {
-    /**
-     * Start helper interval that opens nearby doors if the bot is stuck.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @returns {number} the interval id.
-     **/
-    if (_doorInterval) {
-        clearInterval(_doorInterval);
-    }
-    let prev_pos = bot.entity.position.clone();
-    let prev_check = Date.now();
-    let stuck_time = 0;
-    let isResolving = false;
-    // 最近操作的门位置 + 时间，用于冷却：同一扇门 2 秒内不重复 activate，
-    // 避免 bot 卡在已开的门口时反复 activate 把门关上（开→卡→关→卡→开循环）。
-    let lastDoorPos = null;
-    let lastDoorTime = 0;
-    let doorJustOpenedAt = 0; // 最近一次实际开门的时刻，用于跳推前等开启动画结束
-    const DOOR_COOLDOWN = 2000;
-    // 触发阈值：主动开门已前置（每 200ms 扫面前关着的门立即开），
-    // 这里只兜底"门已开但 bot 仍卡在门框"的情况，跳推穿门。
-    // 1200ms 足以区分"pathfinder 正在规划"和"真的卡住了"。
-    const STUCK_THRESHOLD = 1200;
-
-    function isDoorOpen(block) {
-        // 优先用 block states（mineflayer 的 _properties / getProperties()）
-        try {
-            const props = block.getProperties ? block.getProperties() : block._properties;
-            if (props && typeof props.open === 'boolean') return props.open;
-        } catch (_) { }
-        // 读不到状态时返回 null（"未知"），调用方据此区分"真关着"与"状态不明"。
-        // 之前返回 false 会把读不到状态的开门当成关门去 activate，结果把开着的门关上，
-        // 于是 bot 路过开着的门时反复"关→卡→蹭开→关→卡"鬼畜。
-        return null;
-    }
-
-    function sameDoorPos(a, b) {
-        return a && b && a.x === b.x && a.y === b.y && a.z === b.z;
-    }
-
-    const doorCheckInterval = setInterval(() => {
-        const now = Date.now();
-        if (bot.entity.position.distanceTo(prev_pos) >= 0.1) {
-            stuck_time = 0;
-        } else {
-            stuck_time += now - prev_check;
-        }
-
-        // 主动开门：检测面前 1-2 格内关着的门，不等卡住立即开。
-        // 这是消除"到门口思考人生"的关键——pathfinder 开门交互时机不稳，
-        // 经常开了门没推 bot 进去就 return，bot 干站着等下面的卡住兜底。
-        if (!isResolving) {
-            const facing = [
-                bot.entity.position.offset(0, 0, 1),
-                bot.entity.position.offset(0, 0, -1),
-                bot.entity.position.offset(1, 0, 0),
-                bot.entity.position.offset(-1, 0, 0),
-                bot.entity.position.offset(0, 1, 1),
-                bot.entity.position.offset(0, 1, -1),
-                bot.entity.position.offset(1, 1, 0),
-                bot.entity.position.offset(-1, 1, 0),
-            ];
-            for (const pos of facing) {
-                const block = bot.blockAt(pos);
-                if (!block || !block.name || block.name.includes('iron')) continue;
-                if (!(block.name.includes('door') || block.name.includes('fence_gate') || block.name.includes('trapdoor'))) continue;
-                const openState = isDoorOpen(block);
-                if (openState === true || openState === null) continue; // 开着或状态不明，不碰
-                // 关着的门：冷却内不重复 activate
-                if (sameDoorPos(block.position, lastDoorPos) && Date.now() - lastDoorTime < DOOR_COOLDOWN) continue;
-                bot.activateBlock(block);
-                lastDoorPos = block.position.clone ? block.position.clone() : { ...block.position };
-                lastDoorTime = Date.now();
-                doorJustOpenedAt = Date.now();
-                break; // 一次只开一扇
-            }
-        }
-
-        if (stuck_time > STUCK_THRESHOLD && !isResolving) {
-            isResolving = true;
-            stuck_time = 0;
-            // shuffle positions so we're not always opening the same door
-            const positions = [
-                bot.entity.position.clone(),
-                bot.entity.position.offset(0, 0, 1),
-                bot.entity.position.offset(0, 0, -1),
-                bot.entity.position.offset(1, 0, 0),
-                bot.entity.position.offset(-1, 0, 0),
-            ]
-            let elevated_positions = positions.map(position => position.offset(0, 1, 0));
-            positions.push(...elevated_positions);
-            positions.push(bot.entity.position.offset(0, 2, 0)); // above head
-            positions.push(bot.entity.position.offset(0, -1, 0)); // below feet
-
-            let currentIndex = positions.length;
-            while (currentIndex != 0) {
-                let randomIndex = Math.floor(Math.random() * currentIndex);
-                currentIndex--;
-                [positions[currentIndex], positions[randomIndex]] = [
-                    positions[randomIndex], positions[currentIndex]];
-            }
-
-            let openedDoor = false;
-            let doorBlock = null;
-            let justOpened = false; // 本次循环新开的门
-            let alreadyOpen = false; // 门本来就开着（不是我们开的），不需要辅助穿门
-            for (let position of positions) {
-                let block = bot.blockAt(position);
-                if (block && block.name &&
-                    !block.name.includes('iron') &&
-                    (block.name.includes('door') ||
-                        block.name.includes('fence_gate') ||
-                        block.name.includes('trapdoor'))) {
-                    // 关键：只 activate 确认关着的门。已开的门再 activate 会把它关上，
-                    // 于是 bot 卡在已开门口 → 触发 → 关门 → 卡 → 触发 → 开门... 死循环。
-                    const openState = isDoorOpen(block);
-                    if (openState === true) {
-                        openedDoor = true; // 确认开着，不关它
-                        doorBlock = block;
-                        alreadyOpen = true;
-                        break;
-                    }
-                    if (openState === null) {
-                        // 状态读不到：可能门本来就是开的但 _properties 没同步过来。
-                        // 绝不 activate（会把开着门关上）。交给 pathfinder 自己处理，
-                        // 这里跳过这块继续找下一块，避免误关门造成"卡→蹭"鬼畜。
-                        continue;
-                    }
-                    // openState === false：确认关着，可以 activate
-                    // 冷却：同一扇门 2 秒内不重复 activate（刚开过还在动画/位移中）
-                    if (sameDoorPos(block.position, lastDoorPos) &&
-                        Date.now() - lastDoorTime < DOOR_COOLDOWN) {
-                        openedDoor = true; // 当作已处理，等动画完后再决定是否推
-                        doorBlock = block;
-                        break;
-                    }
-                    bot.activateBlock(block);
-                    lastDoorPos = block.position.clone ? block.position.clone() : { ...block.position };
-                    lastDoorTime = Date.now();
-                    doorJustOpenedAt = Date.now();
-                    openedDoor = true;
-                    justOpened = true;
-                    doorBlock = block;
-                    break;
-                }
-            }
-            // 没有门可开：不再 digObstacle 挖周围方块。挖方块会 bot.dig → 内部
-            // stopDigging 打断当前进行的动作（包括正在挖的矿），并 equipForBlock
-            // 反复切手持物，表现为"挖矿/导航时视线乱飘、切手、dig 全部 aborted"。
-            // 卡住时让 pathfinder 自己重规划绕路（destructiveMovements 的 canDig 路径
-            // 是规划内挖，不抢断当前 dig）。脱困挖方块统一由 unstuck mode（已改为
-            // moveAway 不挖）兜底，这里只开门、不挖。
-            if (!openedDoor) {
-                isResolving = false;
-            } else if (justOpened) {
-                // 刚开的门：开启动画还没结束，bot 跳推也穿不过去，反而会
-                // 卡门框。先安静等待 pathfinder 自己走过去；下一轮若仍卡住，
-                // 门动画也结束了，才进入跳推分支。这里只记录、不动作。
-                stuck_time = 0;
-                prev_pos = bot.entity.position.clone();
-                isResolving = false;
-            } else if (alreadyOpen) {
-                // 门本来就开着：pathfinder 能正常穿过敞开门洞，无需任何辅助。
-                // 之前的跳推反而把正常经过门的 bot 干扰成"卡着蹭"。直接放行，
-                // 重置 stuck_time 让下一轮检测从零开始，避免反复触发。
-                stuck_time = 0;
-                prev_pos = bot.entity.position.clone();
-                isResolving = false;
-            } else {
-                // 门处于冷却中（刚开过、动画可能刚结束但仍卡住）：等开启动画
-                // 结束再朝门中心跳推，把身体对齐穿过门洞。
-                (async () => {
-                    try {
-                        if (doorJustOpenedAt > 0) {
-                            const remain = DOOR_COOLDOWN - (Date.now() - doorJustOpenedAt);
-                            if (remain > 0) await new Promise(r => setTimeout(r, remain));
-                            doorJustOpenedAt = 0;
-                        }
-                        const curPos = bot.entity.position;
-                        // 优先朝门方块中心推：门方块相对 bot 总是轴对齐的邻居，
-                        // 朝门中心走能把身体对齐到门洞正中，避免"半身对门、半身对墙"
-                        // 斜着蹭门框过不去。bot 已站在门方块内（距门中心 <0.3）时
-                        // 退回朝目标方向继续穿门。
-                        let dirX = 0, dirZ = 0;
-                        let usedDoor = false;
-                        if (doorBlock) {
-                            const dcx = doorBlock.position.x + 0.5;
-                            const dcz = doorBlock.position.z + 0.5;
-                            const distToDoor = Math.hypot(dcx - curPos.x, dcz - curPos.z);
-                            if (distToDoor > 0.3) {
-                                dirX = dcx - curPos.x;
-                                dirZ = dcz - curPos.z;
-                                usedDoor = true;
-                            }
-                        }
-                        if (!usedDoor) {
-                            const goal = bot.pathfinder?.goal;
-                            if (goal && typeof goal.x === 'number' && typeof goal.z === 'number') {
-                                dirX = goal.x - curPos.x;
-                                dirZ = goal.z - curPos.z;
-                            } else {
-                                dirX = -Math.sin(bot.entity.yaw);
-                                dirZ = Math.cos(bot.entity.yaw);
-                            }
-                        }
-                        const yaw = Math.atan2(-dirX, -dirZ);
-                        await bot.look(yaw, 0, false);
-                        // 门洞通常 2 格高，前推 + 跳比纯 sprint 更容易挤过去；
-                        // 但只跳一次（600ms），避免反复跳卡门框上沿。
-                        bot.setControlState('forward', true);
-                        bot.setControlState('jump', true);
-                        bot.setControlState('sprint', true);
-                        await new Promise(r => setTimeout(r, 600));
-                        bot.clearControlStates();
-                    } catch (_) { }
-                    isResolving = false;
-                })();
-            }
-        }
-        prev_pos = bot.entity.position.clone();
-        prev_check = now;
-    }, 200);
-    _doorInterval = doorCheckInterval;
-    return doorCheckInterval;
+    // 门完全交给 pathfinder 的 canOpenDoors（默认 true）：A* 规划时把关着的门
+    // 当 useOne 节点加进路径，monitorMovement 走到那格时自动 activateBlock 开门，
+    // 双开门两扇都会开。无需任何外部接管/兜底——接管逻辑会和 pathfinder 抢控制权
+    // 造成蹭门、goto 中断循环。
+    await bot.pathfinder.goto(goal);
+    return true;
 }
 
 export async function goToPosition(bot, x, y, z, min_distance = 2) {
@@ -2470,18 +2288,26 @@ export async function goToPlayer(bot, username, distance = 3) {
 
     bot.modes.pause('self_defense');
     bot.modes.pause('cowardice');
+    bot.modes.pause('unstuck');
+    bot.modes.pause('elbow_room');
     let player = bot.players[username]?.entity;
     if (!player) {
         log(bot, `找不到玩家 ${username}（可能离线或未加载）。`);
+        bot.modes.unpause('unstuck');
+        bot.modes.unpause('elbow_room');
         return false;
     }
 
     distance = Math.max(distance, 0.5);
     const goal = new pf.goals.GoalFollow(player, distance);
 
-    await goToGoal(bot, goal, true);
-
-    log(bot, `已到达 ${username} 身边。`);
+    try {
+        await goToGoal(bot, goal, true);
+        log(bot, `已到达 ${username} 身边。`);
+    } finally {
+        bot.modes.unpause('unstuck');
+        bot.modes.unpause('elbow_room');
+    }
 }
 
 
@@ -2501,7 +2327,6 @@ export async function followPlayer(bot, username, distance = 4) {
     const move = new pf.Movements(bot);
     move.digCost = 10;
     bot.pathfinder.setMovements(move);
-    let doorCheckInterval = startDoorInterval(bot);
 
     bot.pathfinder.setGoal(new pf.goals.GoalFollow(player, distance), true);
     log(bot, `你现在正在跟随玩家 ${username}。`);
@@ -2533,20 +2358,14 @@ export async function followPlayer(bot, username, distance = 4) {
         }
 
         if (distance_from_player <= nearby_distance) {
-            clearInterval(doorCheckInterval);
-            doorCheckInterval = null;
             bot.modes.pause('unstuck');
             bot.modes.pause('elbow_room');
         }
         else {
-            if (!doorCheckInterval) {
-                doorCheckInterval = startDoorInterval(bot);
-            }
             bot.modes.unpause('unstuck');
             bot.modes.unpause('elbow_room');
         }
     }
-    clearInterval(doorCheckInterval);
     return true;
 }
 
@@ -2666,8 +2485,11 @@ export async function useDoor(bot, door_pos = null) {
     if (!door_pos) {
         for (let door_type of ['oak_door', 'spruce_door', 'birch_door', 'jungle_door', 'acacia_door', 'dark_oak_door',
             'mangrove_door', 'cherry_door', 'bamboo_door', 'crimson_door', 'warped_door']) {
-            door_pos = world.getNearestBlock(bot, door_type, 16).position;
-            if (door_pos) break;
+            const nearestDoor = world.getNearestBlock(bot, door_type, 16);
+            if (nearestDoor) {
+                door_pos = nearestDoor.position;
+                break;
+            }
         }
     } else {
         door_pos = Vec3(door_pos.x, door_pos.y, door_pos.z);
@@ -2678,20 +2500,28 @@ export async function useDoor(bot, door_pos = null) {
     }
 
     bot.pathfinder.setGoal(new pf.goals.GoalNear(door_pos.x, door_pos.y, door_pos.z, 1));
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    while (bot.pathfinder.isMoving()) {
+    const startTime = Date.now();
+    while (bot.pathfinder.isMoving() && Date.now() - startTime < 1500) {
         await new Promise((resolve) => setTimeout(resolve, 100));
     }
+    bot.pathfinder.stop();
 
-    let door_block = bot.blockAt(door_pos);
-    await bot.lookAt(door_pos);
-    if (!door_block._properties.open)
+    const door_block = bot.blockAt(door_pos);
+    if (!door_block) {
+        log(bot, `门 ${door_pos} 不存在。`);
+        return false;
+    }
+
+    await bot.lookAt(door_pos.offset(0.5, 1, 0.5));
+    if (!door_block._properties?.open) {
         await bot.activateBlock(door_block);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+    }
 
     bot.setControlState("forward", true);
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    bot.setControlState("forward", false);
-    await bot.activateBlock(door_block);
+    bot.setControlState("sprint", true);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    bot.clearControlStates();
 
     log(bot, `使用了 ${door_pos} 处的门。`);
     return true;

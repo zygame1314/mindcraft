@@ -29,8 +29,10 @@ export class Coder {
     }
 
     async generateCode(agent_history) {
-        // pause all modes while generating/executing code so they don't
-        // trigger actions.stop() and kill the process mid-LLM-request
+        // 暂停所有 modes，防止在 LLM 代码生成请求期间 modes 触发 actions.stop()
+        // 中断网络请求。但代码【执行】阶段需要恢复安全类 modes（self_defense、
+        // self_preservation、cowardice、air），让 bot 执行代码时也能自卫/逃跑/捡东西。
+        // item_collecting/hunting 等只中断 followPlayer 不中断 newAction，可一直开着。
         const modes = this.agent.bot.modes;
         const paused = [];
         if (modes) {
@@ -46,6 +48,36 @@ export class Coder {
                 try { modes.unpause(name); } catch (_) {}
             }
         };
+        // 执行阶段的生命安全监控：代码执行期间 modes 全暂停，bot 裸奔。
+        // 用轻量定时器监控生命值，着火/溺水/血量低时中断代码让 AI 重新决策。
+        // 不通过 mode 系统（那会触发 actions.stop 中断网络请求阶段），
+        // 只在 executionModule.main 执行期间生效。
+        let emergencyInterrupt = false;
+        const healthWatch = setInterval(() => {
+            const bot = this.agent.bot;
+            if (!bot.entity) return;
+            try {
+                // 着火
+                if (bot.entity.onFire && bot.health > 0) {
+                    if (!emergencyInterrupt) console.warn('Code execution interrupted: bot is on fire!');
+                    emergencyInterrupt = true;
+                }
+                // 溺水（氧气耗尽）
+                if (typeof bot.oxygenLevel === 'number' && bot.oxygenLevel <= 0) {
+                    if (!emergencyInterrupt) console.warn('Code execution interrupted: bot is drowning!');
+                    emergencyInterrupt = true;
+                }
+                // 血量极低
+                if (bot.health > 0 && bot.health <= 6) {
+                    if (!emergencyInterrupt) console.warn('Code execution interrupted: bot health critical!');
+                    emergencyInterrupt = true;
+                }
+                if (emergencyInterrupt) {
+                    bot.interrupt_code = true;
+                    bot.pathfinder.stop();
+                }
+            } catch (_) {}
+        }, 500);
         lockdown();
         // this message history is transient and only maintained in this function
         let messages = agent_history.getHistory(); 
@@ -122,11 +154,13 @@ export class Coder {
             try {
                 console.log('Executing code...');
                 await executionModule.main(this.agent.bot);
+                clearInterval(healthWatch);
 
                 const code_output = this.agent.actions.getBotOutputSummary();
                 const summary = "代理编写了以下代码：\n```" + this._sanitizeCode(code) + "```\n代码输出：\n" + code_output;
                 return summary;
             } catch (e) {
+                clearInterval(healthWatch);
                 if (this.agent.bot.interrupt_code)
                     return null;
                 
@@ -147,6 +181,7 @@ export class Coder {
         }
         return `代码生成在 ${MAX_ATTEMPTS} 次尝试后失败。`;
         } finally {
+            clearInterval(healthWatch);
             restore();
         }
     }

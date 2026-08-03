@@ -593,21 +593,50 @@ export const actionsList = [
         },
         perform: runAsAction(async (agent, name, purpose, chest_x, chest_y, chest_z) => {
             const bot = agent.bot;
-            // 传坐标：按坐标精确匹配（与 !viewChest 一致，range=32）。
-            // 不传：收窄到 5 格内取最近，避免并排箱子总记到同一个。
             const range = (chest_x != null) ? 32 : 5;
             const chest = await skills._resolveChestForMemory(bot, chest_x, chest_y, chest_z, range);
             if (!chest) {
                 skills.log(bot, '附近没有箱子可记录。');
                 return;
             }
-            const pos = [chest.position.x, chest.position.y, chest.position.z];
-            // 先查该坐标是否已有命名箱子，告知 AI 是"重命名"还是"新记"
-            const oldName = agent.memory_bank.findChestByPos(...pos);
+            // 检测双联箱：type 为 left/right 时找另一半组成方块，一起记进 positions。
+            const positions = [[chest.position.x, chest.position.y, chest.position.z]];
+            try {
+                const t = chest._properties?.type;
+                if (t === 'left' || t === 'right') {
+                    const pair = t === 'left' ? 'right' : 'left';
+                    // 在相邻方块里找 type 为 pair 的箱子
+                    const adj = [[1,0,0],[-1,0,0],[0,0,1],[0,0,-1]];
+                    for (const [dx,dy,dz] of adj) {
+                        const nb = bot.blockAt(chest.position.offset(dx, dy, dz));
+                        if (nb && nb.name === chest.name && nb._properties?.type === pair) {
+                            positions.push([nb.position.x, nb.position.y, nb.position.z]);
+                            break;
+                        }
+                    }
+                }
+            } catch (_) {}
+            const pos = positions[0];
+            // findChestByPos 精确匹配任一组成方块。若命中已命名箱子，说明在改名/重记，
+            // 显式删旧条目再记新的，避免同一物理箱子留多条记录。
+            let oldName = null;
+            for (const p of positions) {
+                oldName = agent.memory_bank.findChestByPos(...p);
+                if (oldName) break;
+            }
             const isReassign = oldName && oldName !== name && !oldName.startsWith('箱子(');
-            agent.memory_bank.rememberChest(name, purpose || '', pos);
-            let msg = `已记住箱子 "${name}" 于 (${pos[0]}, ${pos[1]}, ${pos[2]})，用途：${purpose || '未填'}。要看内容用 !viewChest。`;
-            if (isReassign) msg += `（该坐标原记为 "${oldName}"，已覆盖，勿重复记录同一箱子。）`;
+            if (isReassign) agent.memory_bank.forgetChest(oldName);
+            // 清理精确同坐标的占位条目
+            for (const p of positions) {
+                const ph = `箱子(${p[0]},${p[1]},${p[2]})`;
+                if (ph !== name && agent.memory_bank.recallChest(ph)) agent.memory_bank.forgetChest(ph);
+            }
+            agent.memory_bank.rememberChest(name, purpose || '', null, positions);
+            const coordStr = positions.length > 1
+                ? positions.map(p => `(${p[0]},${p[1]},${p[2]})`).join('|')
+                : `(${pos[0]},${pos[1]},${pos[2]})`;
+            let msg = `已记住箱子 "${name}" 于 ${coordStr}，用途：${purpose || '未填'}。要看内容用 !viewChest。`;
+            if (isReassign) msg += `（该箱子原记为 "${oldName}"，已改名，勿重复记录。）`;
             skills.log(bot, msg);
         })
     },

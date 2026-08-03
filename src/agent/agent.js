@@ -68,23 +68,30 @@ export class Agent {
 
         // 记忆钩子：skills.js 里的箱子操作在打开/存取后回调此函数，
         // 自动把箱子坐标记进 memory_bank（用途留空，待 AI 用 !rememberChest 命名）。
-        // 不记具体物品——物品会变，记了就过期；要查内容用 !viewChest 实时看。
+        // positions 支持双联箱：传数组时同时记两半坐标，findChestByPos 精确匹配任一。
         const self = this;
-        this.bot._memoryBank = this.memory_bank; // 供 skills.js 直接读取记忆
-        this.bot._recordChestMemory = (position) => {
+        this.bot._memoryBank = this.memory_bank;
+        this.bot._recordChestMemory = (positionOrPositions) => {
             try {
-                if (!position) return;
-                const pos = [position.x, position.y, position.z];
-                // findChestByPos 已支持双联箱相邻方块匹配：若该方块（或相邻方块）
-                // 已登记过箱子（占位或命名），不新建占位，避免双联箱两块各记一条。
-                let name = self.memory_bank.findChestByPos(...pos);
-                if (!name) name = `箱子(${pos[0]},${pos[1]},${pos[2]})`;
+                if (!positionOrPositions) return;
+                // 统一成 positions 数组（单坐标或数组都支持）
+                const positions = Array.isArray(positionOrPositions) && positionOrPositions[0] && !Array.isArray(positionOrPositions[0])
+                    ? positionOrPositions.map(p => [p.x, p.y, p.z])  // [Vec3, Vec3] → [[x,y,z],...]
+                    : Array.isArray(positionOrPositions) && Array.isArray(positionOrPositions[0])
+                        ? positionOrPositions  // 已经是 [[x,y,z],...]
+                        : [[positionOrPositions.x, positionOrPositions.y, positionOrPositions.z]];
+                const primary = positions[0];
+                // 精确匹配：任一组成方块已登记就不重建占位
+                let name = null;
+                for (const p of positions) {
+                    name = self.memory_bank.findChestByPos(...p);
+                    if (name) break;
+                }
+                if (!name) name = `箱子(${primary[0]},${primary[1]},${primary[2]})`;
                 if (name.startsWith('箱子(')) {
                     const exists = self.memory_bank.recallChest(name);
-                    self.memory_bank.rememberChest(name, exists?.purpose || '用途未知', pos);
+                    self.memory_bank.rememberChest(name, exists?.purpose || '用途未知', null, positions);
                 }
-                // 若该坐标已被手动命名（findChestByPos 返回的不是"箱子(...)"格式），
-                // 则不创建占位，保持已命名状态。
             } catch (e) {
                 console.warn('recordChestMemory error:', e.message);
             }

@@ -80,27 +80,26 @@ export class MemoryBank {
 
     // ---------- 容器 ----------
     // 记一个箱子的别名+用途/标签，不记具体物品（物品会变，记了就过期）。
-    // pos 可选；purpose 必填（用途/标签，如"存矿物""食物""杂物"）。
-    // 若已有同名箱子则更新用途，坐标留旧值。
-    // 关键：手动命名时自动清理同坐标的"箱子(x,y,z)"占位条目，
-    // 避免一个箱子在记忆里既有占位又有命名两条记录。
-    rememberChest(name, purpose, pos = null) {
+    // pos 可选（单坐标）；positions 可选（双联箱两半坐标数组，优先于 pos）。
+    // purpose 必填。传坐标时清理精确同坐标的旧条目（含占位），不清理相邻。
+    // 双联箱两半通过 positions 数组记录，findChestByPos 只做精确匹配。
+    rememberChest(name, purpose, pos = null, positions = null) {
         if (!name) return false;
         const old = this.chests[name];
-        // 若传入坐标，清理该坐标上所有已登记箱子（占位或命名），
-        // 含相邻方块（双联箱另一半）。避免同一物理箱子在记忆里留多个名字。
-        if (pos) {
-            const rp = pos.map(round);
-            for (const k in this.chests) {
-                if (k === name) continue;
-                const p = this.chests[k].pos;
-                if (!p) continue;
-                const d = Math.abs(p[0] - rp[0]) + Math.abs(p[1] - rp[1]) + Math.abs(p[2] - rp[2]);
-                if (d <= 1) delete this.chests[k];
+        const allPos = positions ? positions.map(p => p.map(round)) : (pos ? [pos.map(round)] : null);
+        if (allPos) {
+            for (const rp of allPos) {
+                for (const k in this.chests) {
+                    if (k === name) continue;
+                    const p = this.chests[k].pos;
+                    if (!p) continue;
+                    if (p[0] === rp[0] && p[1] === rp[1] && p[2] === rp[2]) delete this.chests[k];
+                }
             }
         }
         this.chests[name] = {
-            pos: pos ? pos.map(round) : (old?.pos || null),
+            pos: allPos ? allPos[0] : (old?.pos || null),
+            positions: allPos && allPos.length > 1 ? allPos : undefined,
             purpose: clamp(purpose, 200),
             ts: Date.now(),
         };
@@ -111,18 +110,20 @@ export class MemoryBank {
         return this.chests[name] || null;
     }
 
-    // 按坐标找已记录的箱子（坐标四舍五入匹配），返回 name。
-    // 双联箱由两个相邻方块组成，任一方块坐标命中即视为同一箱子，
-    // 避免双联箱两块各登记一个占位导致记忆翻倍。
+    // 按坐标找已记录的箱子（精确匹配），返回 name。
+    // 双联箱两半坐标都存在 positions 数组里，任一命中即返回。
+    // 不做相邻猜测——并排两排独立单箱也相邻，猜测会误并不同箱子。
     findChestByPos(x, y, z) {
         const tx = round(x), ty = round(y), tz = round(z);
         for (const name in this.chests) {
-            const p = this.chests[name].pos;
-            if (!p) continue;
-            // 精确匹配
-            if (p[0] === tx && p[1] === ty && p[2] === tz) return name;
-            // 相邻方块匹配（双联箱另一半）
-            if (Math.abs(p[0] - tx) + Math.abs(p[1] - ty) + Math.abs(p[2] - tz) === 1) return name;
+            const c = this.chests[name];
+            if (!c.pos) continue;
+            if (c.pos[0] === tx && c.pos[1] === ty && c.pos[2] === tz) return name;
+            if (c.positions) {
+                for (const p of c.positions) {
+                    if (p[0] === tx && p[1] === ty && p[2] === tz) return name;
+                }
+            }
         }
         return null;
     }
@@ -217,7 +218,11 @@ export class MemoryBank {
             for (const name in this.chests) {
                 const c = this.chests[name];
                 let line = `- ${name}`;
-                if (c.pos) line += ` ${coordStr(c.pos)}`;
+                if (c.positions && c.positions.length > 1) {
+                    line += ` ${c.positions.map(coordStr).join('|')}`;
+                } else if (c.pos) {
+                    line += ` ${coordStr(c.pos)}`;
+                }
                 if (c.purpose) line += ` 用途:${c.purpose}`;
                 lines.push(line);
             }
