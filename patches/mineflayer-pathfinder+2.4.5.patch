@@ -1,5 +1,5 @@
 diff --git a/node_modules/mineflayer-pathfinder/index.js b/node_modules/mineflayer-pathfinder/index.js
-index b38bd30..2ca8205 100644
+index b38bd30..86d3976 100644
 --- a/node_modules/mineflayer-pathfinder/index.js
 +++ b/node_modules/mineflayer-pathfinder/index.js
 @@ -14,6 +14,7 @@ const interactableBlocks = require('./lib/interactable.json')
@@ -64,16 +64,75 @@ index b38bd30..2ca8205 100644
                  if (bot.pathfinder.LOSWhenPlacingBlocks && placingBlock.returnPos) returningPos = placingBlock.returnPos.clone()
                })
                .catch(_ignoreError => {
-@@ -576,7 +596,7 @@ function inject (bot) {
+@@ -576,7 +596,66 @@ function inject (bot) {
      let dx = nextPoint.x - p.x
      const dy = nextPoint.y - p.y
      let dz = nextPoint.z - p.z
 -    if (Math.abs(dx) <= 0.35 && Math.abs(dz) <= 0.35 && Math.abs(dy) < 1) {
++
++    // 攀爬物（梯子/藤蔓）向上专用处理。
++    // 原版对垂直爬升节点用 bot.look(atan2(-dx,-dz),0)：dx=dz=0 时 atan2(0,0)=0，
++    // 朝向退化且通常不对着墙；配合下面 dy<1 的宽松到达判定，bot 还没真正爬到
++    // 上一格就被判"到达"并 shift 路径，下一节点更高，canStraightLine 失败走到
++    // else 分支把 forward 关掉，bot 在梯子上失去推进 → 下滑 → 重新规划 → 反复
++    // "爬一点又滑下"。修法：bot 在攀爬物里且目标在上方时，手动接管——朝梯子所
++    // 贴的墙体方向持续 forward（梯子上跳跃只会脱离碰撞体没用），到达判定收紧
++    // 到真正接近节点 y 才 shift。若下一节点已不是攀爬物（到顶要踏出去），改为
++    // 朝离开墙的方向 forward + sneak，走上顶面平台而不是直直升空。
++    {
++      const _feetBlock = bot.blockAt(p.floored())
++      if (_feetBlock && stateMovements.climbables.has(_feetBlock.type) && dy > 0.2) {
++        // 找墙体：攀爬物周围 boundingBox==='block' 的最近方块（即所贴的墙）
++        let _wx = 0, _wz = 0, _wallBest = -1
++        const _nbBase = p.floored()
++        for (const [_ax, _az] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
++          const _nb = bot.blockAt(_nbBase.offset(_ax, 0, _az))
++          if (_nb && _nb.boundingBox === 'block' && !stateMovements.climbables.has(_nb.type)) {
++            const _d = _ax * _ax + _az * _az
++            if (_wallBest < 0 || _d < _wallBest) { _wallBest = _d; _wx = _ax; _wz = _az }
++          }
++        }
++        const _nextBlock = bot.blockAt(new Vec3(nextPoint.x, nextPoint.y, nextPoint.z))
++        const _nextIsClimbable = _nextBlock && stateMovements.climbables.has(_nextBlock.type)
++        if (_wallBest >= 0) {
++          if (_nextIsClimbable) {
++            // 上面还有一格攀爬物：朝墙看，forward 推进 = 向上爬
++            bot.look(Math.atan2(-_wx, -_wz), 0)
++          } else {
++            // 到顶了，下一节点不是攀爬物：朝离开墙的方向走出去踏上平台
++            bot.look(Math.atan2(_wx, _wz), 0)
++          }
++        }
++        bot.setControlState('forward', true)
++        bot.setControlState('jump', false) // 梯子上跳跃没用，只能推进
++        bot.setControlState('sprint', false)
++        bot.setControlState('sneak', _nextIsClimbable ? false : true) // 出梯时 sneak 防止踩空前掉回井里
++        // 收紧到达判定：bot 真正爬到节点 y 附近才 shift，避免提前换节点导致 forward 被关
++        if (Math.abs(dx) <= 0.3 && Math.abs(dz) <= 0.3 && dy <= 0.25) {
++          lastNodeTime = performance.now()
++          if (stopPathing) { stop(); return }
++          path.shift()
++          if (path.length === 0) {
++            if (!dynamicGoal && stateGoal && (stateGoal.isEnd(p.floored()) || stateGoal.isEnd(p.floored().offset(0, 1, 0)))) {
++              bot.emit('goal_reached', stateGoal)
++              stateGoal = null
++            }
++            fullStop()
++            return
++          }
++        }
++        if (performance.now() - lastNodeTime > 3500) {
++          resetPath('stuck_climb')
++        }
++        return
++      }
++    }
++
 +    if (Math.abs(dx) <= 0.175 && Math.abs(dz) <= 0.175 && Math.abs(dy) < 1) {
        // arrived at next point
        lastNodeTime = performance.now()
        if (stopPathing) {
-@@ -611,6 +631,9 @@ function inject (bot) {
+@@ -611,6 +690,9 @@ function inject (bot) {
      if (bot.entity.isInWater) {
        bot.setControlState('jump', true)
        bot.setControlState('sprint', false)
@@ -83,6 +142,20 @@ index b38bd30..2ca8205 100644
      } else if (stateMovements.allowSprinting && physics.canStraightLine(path, true)) {
        bot.setControlState('jump', false)
        bot.setControlState('sprint', true)
+@@ -631,7 +713,12 @@ function inject (bot) {
+     // check for futility
+     if (performance.now() - lastNodeTime > 3500) {
+       // should never take this long to go to the next node
+-      resetPath('stuck')
++      // but don't count as stuck while actively digging a block
++      if (digging) {
++        lastNodeTime = performance.now()
++      } else {
++        resetPath('stuck')
++      }
+     }
+   }
+ }
 diff --git a/node_modules/mineflayer-pathfinder/lib/movements.js b/node_modules/mineflayer-pathfinder/lib/movements.js
 index a7e3505..84a0841 100644
 --- a/node_modules/mineflayer-pathfinder/lib/movements.js
