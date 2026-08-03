@@ -88,6 +88,87 @@ const modes_list = [
         }
     },
     {
+        name: 'hunger',
+        description: '饥饿值过低时主动吃食物；背包没食物则提示AI寻找。',
+        interrupts: ['all'],
+        on: true,
+        active: false,
+        cooldown: 30,       // 两次"提示AI"之间的最小间隔（秒），避免刷屏
+        grace: 30,          // bot 登录后多少秒内不触发（给初始化/首条消息留时间）
+        last_prompt: 0,     // 0 表示尚未提示过；首次提示需先过 grace
+        first_tick: 0,      // 首次 update 的时间戳，用于计算 grace
+        eating: false,      // 是否正在执行主动进食（防重入）
+        // 与 agent.js 中 auto-eat 的 bannedFood 保持一致
+        bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish', 'chicken'],
+        update: async function (agent) {
+            const bot = agent.bot;
+            // 创造/旁观模式不会饿，无需处理
+            if (bot.game.gameMode === 'creative' || bot.game.gameMode === 'spectator') return;
+            // 记录首次 tick 时间，用于启动宽限期
+            if (this.first_tick === 0) this.first_tick = Date.now();
+            // 正在主动进食中，不重复触发
+            if (this.eating) return;
+
+            // ===== 单一职责：只看饥饿值，不看血量 =====
+            // 回血由 auto-eat（startAt:18，food<18 自动吃）+ MC 自动回血机制覆盖，
+            // 不由本模式负责。这样中毒/溺水/着火/卡沙子等"只扣血不扣饥饿"的危险
+            // 不会触发本模式去吃食物（吃不了/白费），无需为每种危险打补丁。
+            // 本模式只在饥饿值危急（food<=6，快要饿死）时才介入。
+            const starving = bot.food <= 6;
+            if (!starving) return;
+
+            // 背包里是否有"非禁用"的可食用物品（item.food>0 表示可食用）
+            const edibleItems = bot.inventory.items().filter(
+                item => item.food > 0 && !this.bannedFood.includes(item.name)
+            );
+            if (edibleItems.length === 0) {
+                // 背包没食物：提示 AI 找食物
+                const now = Date.now();
+                // 启动宽限期内不触发，避免抢断初始化/首条消息
+                if (now - this.first_tick < this.grace * 1000) return;
+                // 冷却期内不重复提示
+                if (this.last_prompt !== 0 && now - this.last_prompt < this.cooldown * 1000) return;
+                this.last_prompt = now;
+                say(agent, '我快饿死了，背包里没有食物！');
+                // 不 await：handleMessage 会驱动一次 LLM 规划（耗时数十秒），若在这里
+                // await 会阻塞 modes.update 主循环，导致 self_preservation/self_defense
+                // 等救命模式在这期间无法响应（着火/溺水没人管）。改为后台触发，冷却
+                // 已置位可防重复；handleMessage 的异常用 catch 兜住避免 unhandled rejection。
+                agent.handleMessage('system',
+                    `(自动消息)你的饥饿值已降至 ${Math.round(bot.food)}/20，而背包里没有任何可食用的食物，auto-eat 无法帮你恢复。请尽快规划获取食物：猎杀附近动物、采集作物、钓鱼或向其他玩家索要食物，拿到食物后用 !consume 食用。`)
+                    .catch(e => console.warn(`hunger mode handleMessage error: ${e}`));
+                return;
+            }
+
+            // 背包有食物：主动吃到不饿死（>=7）。
+            // 只解决"饿死"，不追求回血（回血交给 auto-eat+MC 机制）。
+            this.eating = true;
+            const target = 7;
+            execute(this, agent, async () => {
+                say(agent, '饿死了，吃点东西！');
+                // 循环吃到达标或食物耗尽。每次吃一件，避免一次只回固定点数不够。
+                let safety = 0;
+                while (bot.food < target && safety < 20) {
+                    safety++;
+                    // 重新查找：吃完一件后背包食物可能变化
+                    const item = bot.inventory.items().find(
+                        it => it.food > 0 && !this.bannedFood.includes(it.name)
+                    );
+                    if (!item) break;
+                    try {
+                        await skills.consume(bot, item.name);
+                    } catch (e) {
+                        console.warn(`hunger mode consume error: ${e}`);
+                        break;
+                    }
+                    // 给服务端一点时间同步饥饿值
+                    await new Promise(r => setTimeout(r, 400));
+                }
+            }).then(() => { this.eating = false; })
+              .catch(() => { this.eating = false; });
+        }
+    },
+    {
         name: 'unstuck',
         description: 'Attempt to get unstuck when in the same place for a while. Interrupts some actions.',
         interrupts: ['all'],
@@ -173,14 +254,32 @@ const modes_list = [
                 this.stuck_time = 0;
                 execute(this, agent, async () => {
                     const crashTimeout = setTimeout(() => { agent.cleanKill("卡住了且无法脱困") }, 10000);
-                    // 贴梯子/藤蔓卡住（常见：向下梯子入口边缘零位移反复跳）：
-                    // moveAway 会把 bot 推离梯子，pathfinder goal 又把它拉回 → 横跳。
-                    // 改为先尝试主动沿梯子推进：找到最近的攀爬方块，朝它的水平方向 +
-                    // 略微下移方向走 1~2 秒，让 bot 真正"贴上去滑下来"，而不是在边缘蹭。
-                    // 仍不行再 fallback 到 moveAway。
+                    // 贴梯子/藤蔓卡住分两种情况，脱困动作相反：
+                    //   1. 向上爬到顶想出来（"上来又退下挂边缘"）：bot 在梯子顶，pathfinder 的
+                    //      getMoveClimbTop 用 jump 到 y+2 踏顶面，但 jump 把 bot 弹离梯子碰撞
+                    //      → 回落挂边缘 → 又爬上来 → 循环。实测只 forward 朝顶面方向就能走上
+                    //      去，不要 jump。脱困：朝离开梯子方向 forward（踏上顶面），sneak 防跌落。
+                    //   2. 向下入口边缘（"零位移反复跳"）：bot 想进梯子但贴不上。
+                    //      脱困应朝梯子方向 forward+sneak 让它真正贴上去滑下来。
+                    //   用 pathfinder goal 的 y 判断方向：goal 在上方→向上出梯，下方→向下进梯。
+                    //   没有可读 goal 时 fallback：脚下是固体且头/旁是梯子→向上；否则向下。
                     if (inClimbable) {
                         const me = bot.entity.position.clone();
                         try {
+                            let goingUp = null;
+                            const goal = bot.pathfinder?.goal;
+                            if (goal && typeof goal.y === 'number') {
+                                goingUp = goal.y > me.y + 0.5;
+                            }
+                            if (goingUp === null) {
+                                const feet = bot.blockAt(_p);
+                                const below = bot.blockAt(_p.offset(0, -1, 0));
+                                const feetSolid = feet && feet.physical && !climbableNames.includes(feet.name);
+                                const belowSolid = below && below.physical && !climbableNames.includes(below.name);
+                                goingUp = feetSolid || belowSolid; // 脚下能站稳 + 贴着梯子 = 在顶要出来
+                            }
+                            // 找水平方向目标点：向上时朝"脚下固体方块延伸方向"（顶面），
+                            // 向下时朝最近梯子方块。都取最近攀爬方块作方向基准再按方向修正。
                             let target = null, bestD = Infinity;
                             for (const b of _around) {
                                 if (!b || !climbableNames.includes(b.name)) continue;
@@ -189,15 +288,29 @@ const modes_list = [
                             }
                             if (target) {
                                 const dir = target.minus(me);
-                                // 水平方向走过去 + 蹲下/向前，触发进入梯子
+                                // 向上出梯要手动接管控制：pathfinder 的 monitorMovement 每
+                                // physicsTick 会用 goal 覆盖 yaw/control，和我们的 setControlState
+                                // 抢，导致刚走上去又被它拉回梯子。stop 让它停止覆盖。
+                                if (goingUp) {
+                                    try { bot.pathfinder.stop(); } catch (_) { }
+                                }
                                 bot.setControlState('forward', true);
                                 bot.setControlState('sprint', false);
-                                bot.setControlState('sneak', true);
-                                // 朝梯子水平分量方向看
-                                if (Math.abs(dir.x) > Math.abs(dir.z)) {
-                                    bot.setControlState(dir.x > 0 ? 'right' : 'left', true);
+                                if (goingUp) {
+                                    // 向上出梯：只 forward 朝离开梯子方向走上顶面（不要 jump，
+                                    // jump 会把 bot 弹离梯子挂边缘）。sneak 防踏上顶面前从梯子侧跌落。
+                                    bot.setControlState('sneak', true);
+                                    // 看向梯子反方向（离开梯子踏上顶面）
+                                    const awayYaw = Math.atan2(-dir.x, -dir.z) + Math.PI;
+                                    await bot.look(awayYaw, 0, false);
                                 } else {
-                                    bot.setControlState(dir.z > 0 ? 'back' : 'forward', true);
+                                    // 向下进梯：朝梯子方向贴上去滑下来
+                                    bot.setControlState('sneak', true);
+                                    if (Math.abs(dir.x) > Math.abs(dir.z)) {
+                                        bot.setControlState(dir.x > 0 ? 'right' : 'left', true);
+                                    } else {
+                                        bot.setControlState(dir.z > 0 ? 'back' : 'forward', true);
+                                    }
                                 }
                                 await new Promise(r => setTimeout(r, 1500));
                                 bot.clearControlStates();

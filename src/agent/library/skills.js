@@ -447,6 +447,126 @@ export async function clearNearestFurnace(bot) {
 }
 
 
+// --- 铁砧辅助 ---
+// 找到附近铁砧方块并导航过去；若附近没有但背包里有铁砧，则放置一个并使用。
+// 返回打开后的 Anvil 句柄；失败返回 null。调用方负责关闭窗口。
+async function openAnvilNearby(bot) {
+    const anvilRange = 16;
+    let anvilBlock = world.getNearestBlock(bot, 'anvil', anvilRange);
+    let placedAnvil = false;
+    if (!anvilBlock) {
+        let hasAnvil = world.getInventoryCounts(bot)['anvil'] > 0;
+        if (hasAnvil) {
+            let pos = world.getNearestFreeSpace(bot, 1, anvilRange);
+            await placeBlock(bot, 'anvil', pos.x, pos.y, pos.z);
+            anvilBlock = world.getNearestBlock(bot, 'anvil', anvilRange);
+            placedAnvil = true;
+        }
+    }
+    if (!anvilBlock) {
+        log(bot, `附近没有铁砧，你也没有铁砧。`);
+        return null;
+    }
+    if (bot.entity.position.distanceTo(anvilBlock.position) > 4) {
+        const reached = await goToNearestBlock(bot, 'anvil', 4, anvilRange);
+        anvilBlock = world.getNearestBlock(bot, 'anvil', anvilRange);
+        if (!reached || !anvilBlock || bot.entity.position.distanceTo(anvilBlock.position) > 4.5) {
+            log(bot, `无法到达铁砧。`);
+            if (placedAnvil) { try { await collectBlock(bot, 'anvil', 1); } catch (_) { } }
+            return null;
+        }
+    }
+    bot.modes.pause('unstuck');
+    await bot.lookAt(anvilBlock.position);
+    try {
+        const anvil = await bot.openAnvil(anvilBlock);
+        return { anvil, anvilBlock, placedAnvil };
+    } catch (err) {
+        bot.modes.unpause('unstuck');
+        log(bot, `打开铁砧失败：${err}。`);
+        if (placedAnvil) { try { await collectBlock(bot, 'anvil', 1); } catch (_) { } }
+        return null;
+    }
+}
+
+export async function combineItemsAtAnvil(bot, itemOneName, itemTwoName, newName = null) {
+    /**
+     * Combine two items at an anvil. Used to repair tools/armor (e.g. two damaged pickaxes combine into one with more durability) or to merge enchantments from a book/enchanted item onto another item. Requires an anvil nearby (or one in the inventory to place).
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {string} itemOneName, the target item to repair/merge onto.
+     * @param {string} itemTwoName, the sacrifice item (same type for repair, or enchanted_book to transfer enchantments).
+     * @param {string} newName, optional new name to give the result item.
+     * @returns {Promise<boolean>} true if the items were combined, false otherwise.
+     * @example
+     * await skills.combineItemsAtAnvil(bot, "diamond_pickaxe", "diamond_pickaxe");
+     * await skills.combineItemsAtAnvil(bot, "diamond_sword", "enchanted_book");
+     * await skills.combineItemsAtAnvil(bot, "diamond_pickaxe", "diamond_pickaxe", "Super Pick");
+     **/
+    const itemOne = bot.inventory.findInventoryItem(itemOneName);
+    if (!itemOne) {
+        log(bot, `你没有 ${itemOneName} 可以在铁砧上组合。`);
+        return false;
+    }
+    const itemTwo = bot.inventory.findInventoryItem(itemTwoName);
+    if (!itemTwo) {
+        log(bot, `你没有 ${itemTwoName} 作为第二个物品。`);
+        return false;
+    }
+
+    const opened = await openAnvilNearby(bot);
+    if (!opened) return false;
+    const { anvil, anvilBlock, placedAnvil } = opened;
+    try {
+        await anvil.combine(itemOne, itemTwo, newName ?? undefined);
+        log(bot, `成功在铁砧 ${posStr(anvilBlock.position)} 上组合了 ${itemOneName} 和 ${itemTwoName}${newName ? `，并重命名为 "${newName}"` : ''}。`);
+        return true;
+    } catch (err) {
+        log(bot, `在铁砧上组合 ${itemOneName} 和 ${itemTwoName} 失败：${err}。可能需要更多经验等级。`);
+        return false;
+    } finally {
+        try { await bot.closeWindow(anvil); } catch (_) { }
+        bot.modes.unpause('unstuck');
+        if (placedAnvil) { try { await collectBlock(bot, 'anvil', 1); } catch (_) { } }
+    }
+}
+
+export async function renameItemAtAnvil(bot, itemName, newName) {
+    /**
+     * Rename an item at an anvil. Costs experience levels.
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {string} itemName, the item to rename.
+     * @param {string} newName, the new name to give the item.
+     * @returns {Promise<boolean>} true if the item was renamed, false otherwise.
+     * @example
+     * await skills.renameItemAtAnvil(bot, "diamond_sword", "Excalibur");
+     **/
+    const item = bot.inventory.findInventoryItem(itemName);
+    if (!item) {
+        log(bot, `你没有 ${itemName} 可以重命名。`);
+        return false;
+    }
+    if (!newName) {
+        log(bot, `新名字不能为空。`);
+        return false;
+    }
+    const opened = await openAnvilNearby(bot);
+    if (!opened) return false;
+    const { anvil, anvilBlock, placedAnvil } = opened;
+    try {
+        await anvil.rename(item, newName);
+        log(bot, `成功在铁砧 ${posStr(anvilBlock.position)} 上把 ${itemName} 重命名为 "${newName}"。`);
+        return true;
+    } catch (err) {
+        log(bot, `重命名 ${itemName} 失败：${err}。可能需要更多经验等级。`);
+        return false;
+    } finally {
+        try { await bot.closeWindow(anvil); } catch (_) { }
+        bot.modes.unpause('unstuck');
+        if (placedAnvil) { try { await collectBlock(bot, 'anvil', 1); } catch (_) { } }
+    }
+}
+
+
 export async function attackNearest(bot, mobType, kill = true) {
     /**
      * Attack mob of the given type.
@@ -1241,6 +1361,50 @@ function posStr(pos) {
     return `(${pos.x}, ${pos.y}, ${pos.z})`;
 }
 
+// --- 双联箱配对判定 ---
+// Minecraft 大型箱子由两个相邻方块组成，两半必须满足：
+//   1) type 一个是 'left' 一个是 'right'（不能是 'single'）；
+//   2) facing（朝向）完全相同；
+//   3) 两半沿"垂直于 facing 的轴"相邻（facing=north/south 时沿 x 轴，facing=east/west 时沿 z 轴）；
+//   4) left/right 与偏移方向严格对应（见 CHEST_PAIR_OFFSET）。
+// 旧实现只判 type 互补 + 相邻，没校验 facing/方向，会把"同朝向并排的多排双联箱"中
+// 不同箱子的两半误配成一对（例：z=-239 的石料箱和 z=-237 的食物箱都被误配到 z=-238
+// 的同一块），导致记忆里两个箱子共用一半坐标，互相覆盖名字。
+// CHEST_PAIR_OFFSET：给定某一半的 facing 和 type，其另一半应处的相对偏移。
+// 依据原版 ChestBlock.getConnectedDirection（参见 CoreProtect ChestTool.java 复刻）：
+//   type=left  的另一半在 facing.rotateY() 方向（顺时针 90°，北→东→南→西）；
+//   type=right 的另一半在 facing.rotateYCCW() 方向（逆时针 90°，北→西→南→东）。
+// 换算成方块偏移：
+//   north: left→东(+x), right→西(-x)
+//   south: left→西(-x), right→东(+x)
+//   east:  left→南(+z), right→北(-z)
+//   west:  left→北(-z), right→南(+z)
+const CHEST_PAIR_OFFSET = {
+    north: { left: [1, 0, 0], right: [-1, 0, 0] },
+    south: { left: [-1, 0, 0], right: [1, 0, 0] },
+    east: { left: [0, 0, 1], right: [0, 0, -1] },
+    west: { left: [0, 0, -1], right: [0, 0, 1] },
+};
+
+// 判断 blockB 是否是 blockA 的双联箱另一半。两者均需为 chest 方块且带有 _properties。
+// 任一属性读不到返回 false（保守不合并，避免误并）。
+export function isChestOtherHalf(blockA, blockB) {
+    if (!blockA || !blockB || blockA.name !== 'chest' || blockB.name !== 'chest') return false;
+    let pa, pb;
+    try { pa = blockA._properties; pb = blockB._properties; } catch (_) { return false; }
+    if (!pa || !pb) return false;
+    const ta = pa.type, tb = pb.type, fa = pa.facing, fb = pa.facing;
+    if (!ta || !tb || ta === 'single' || tb === 'single') return false;
+    if (ta === tb) return false; // 必须 left/right 互补
+    if (!fa || !fb || fa !== fb) return false; // 朝向必须一致
+    const expect = CHEST_PAIR_OFFSET[fa]?.[ta];
+    if (!expect) return false;
+    const dx = blockB.position.x - blockA.position.x;
+    const dy = blockB.position.y - blockA.position.y;
+    const dz = blockB.position.z - blockA.position.z;
+    return dx === expect[0] && dy === expect[1] && dz === expect[2];
+}
+
 export async function viewNearbyChests(bot, range = 32) {
     /**
      * List all chests within range with their contents. Each chest is identified by its coordinates so the agent can target it later with putInChest/takeFromChest/viewChest.
@@ -1298,8 +1462,10 @@ export async function viewNearbyChests(bot, range = 32) {
             if (!isAdjacent(chest.position, other.position)) continue;
             let match = false;
             if (canPairByType) {
-                // 严格配对：left 配 right，right 配 left
-                match = (t === 'left' && ot === 'right') || (t === 'right' && ot === 'left');
+                // 严格配对：用 isChestOtherHalf 校验 facing/方向/互补 type，
+                // 不能只看 type 互补，否则并排多排双联箱会跨箱误并
+                // （旧实现把 z=-239 石料箱与 z=-237 食物箱都误配到 z=-238 同一块）。
+                match = isChestOtherHalf(chest, other) || isChestOtherHalf(other, chest);
             } else if (!t && !ot) {
                 // type 都读不到：标记待定，先不合并，后面用内容比对
                 match = false; // 这里先不合并，下面 fallback 处理

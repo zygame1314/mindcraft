@@ -349,6 +349,29 @@ export const actionsList = [
             await skills.clearNearestFurnace(agent.bot);
         })
     },
+    {
+        name: '!combineAtAnvil',
+        description: 'Combine two items at an anvil. Used to repair tools/armor (combine two of the same damaged item) or to transfer enchantments from an enchanted_book onto an item. Requires an anvil nearby or in inventory, and costs experience levels.',
+        params: {
+            'item_one': { type: 'ItemName', description: 'The target item to repair or merge enchantments onto.' },
+            'item_two': { type: 'ItemName', description: 'The sacrifice item (same type to repair, or enchanted_book to transfer enchantments).' },
+            'new_name': { type: 'string', description: 'Optional new name for the result item. Pass empty string to skip renaming.', default: '' }
+        },
+        perform: runAsAction(async (agent, item_one, item_two, new_name) => {
+            await skills.combineItemsAtAnvil(agent.bot, item_one, item_two, new_name || null);
+        })
+    },
+    {
+        name: '!renameAtAnvil',
+        description: 'Rename an item at an anvil. Costs experience levels. Requires an anvil nearby or in inventory.',
+        params: {
+            'item_name': { type: 'ItemName', description: 'The item to rename.' },
+            'new_name': { type: 'string', description: 'The new name to give the item.' }
+        },
+        perform: runAsAction(async (agent, item_name, new_name) => {
+            await skills.renameItemAtAnvil(agent.bot, item_name, new_name);
+        })
+    },
         {
         name: '!placeHere',
         description: 'Place a given block in the current location. Do NOT use to build structures, only use for single blocks/torches.',
@@ -599,17 +622,18 @@ export const actionsList = [
                 skills.log(bot, '附近没有箱子可记录。');
                 return;
             }
-            // 检测双联箱：type 为 left/right 时找另一半组成方块，一起记进 positions。
+            // 检测双联箱另一半，一起记进 positions。
+            // 必须用 isChestOtherHalf 校验 facing/方向/互补 type，不能只看 type 互补：
+            // 并排多排双联箱时，不同箱子的两半也可能相邻且 type 互补（left+right），
+            // 旧实现会把它们误配成一对，导致记忆里两个箱子共用一半坐标、互相覆盖名字。
             const positions = [[chest.position.x, chest.position.y, chest.position.z]];
             try {
                 const t = chest._properties?.type;
                 if (t === 'left' || t === 'right') {
-                    const pair = t === 'left' ? 'right' : 'left';
-                    // 在相邻方块里找 type 为 pair 的箱子
                     const adj = [[1,0,0],[-1,0,0],[0,0,1],[0,0,-1]];
                     for (const [dx,dy,dz] of adj) {
                         const nb = bot.blockAt(chest.position.offset(dx, dy, dz));
-                        if (nb && nb.name === chest.name && nb._properties?.type === pair) {
+                        if (nb && nb.name === chest.name && skills.isChestOtherHalf(chest, nb)) {
                             positions.push([nb.position.x, nb.position.y, nb.position.z]);
                             break;
                         }

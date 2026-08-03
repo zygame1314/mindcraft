@@ -220,9 +220,11 @@ export class Agent {
         });
 
         // Set up auto-eat
+        // startAt 18：饥饿值掉到 18 就开始吃，确保始终维持在回血阈值（18+），
+        // 不用等掉血才触发。回血需要满饥饿度，14 太低会导致受伤后无法回血。
         this.bot.autoEat.options = {
             priority: 'foodPoints',
-            startAt: 14,
+            startAt: 18,
             bannedFood: ["rotten_flesh", "spider_eye", "poisonous_potato", "pufferfish", "chicken"]
         };
 
