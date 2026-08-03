@@ -70,9 +70,33 @@ export const queryList = [
             let bot = agent.bot;
             let inventory = world.getInventoryCounts(bot);
             let res = 'INVENTORY';
+            // 可磨损物品（工具/防具）按单独的物品堆显示耐久，而非合并计数。
+            // 否则 AI 看到的是 "diamond_pickaxe: 1" 却不知道它快爆了。
+            // 同名但耐久不同的多把工具会各自列一行，让 AI 能挑耐久高的用。
+            const durabilityLabel = (item) => {
+                if (!item || !item.maxDurability) return null;
+                const used = item.durabilityUsed ?? 0;
+                const left = item.maxDurability - used;
+                return `${left}/${item.maxDurability}`;
+            };
+            const damageableByName = {};
+            for (const slot of bot.inventory.slots) {
+                if (slot && slot.name && slot.maxDurability) {
+                    (damageableByName[slot.name] ??= []).push(slot);
+                }
+            }
             for (const item in inventory) {
-                if (inventory[item] && inventory[item] > 0)
-                    res += `\n- ${item}: ${inventory[item]}`;
+                if (inventory[item] && inventory[item] > 0) {
+                    const stacks = damageableByName[item];
+                    if (stacks && stacks.length > 0) {
+                        for (const s of stacks) {
+                            const d = durabilityLabel(s);
+                            res += `\n- ${item}: 1${d ? ` (耐久 ${d})` : ''}`;
+                        }
+                    } else {
+                        res += `\n- ${item}: ${inventory[item]}`;
+                    }
+                }
             }
             if (res === 'INVENTORY') {
                 res += ': Nothing';
@@ -86,16 +110,16 @@ export const queryList = [
             let leggings = bot.inventory.slots[7];
             let boots = bot.inventory.slots[8];
             res += '\nWEARING: ';
-            if (helmet)
-                res += `\nHead: ${helmet.name}`;
-            if (chestplate)
-                res += `\nTorso: ${chestplate.name}`;
-            if (leggings)
-                res += `\nLegs: ${leggings.name}`;
-            if (boots)
-                res += `\nFeet: ${boots.name}`;
+            const wear = (label, it) => it ? `\n${label}: ${it.name}${durabilityLabel(it) ? ` (耐久 ${durabilityLabel(it)})` : ''}` : '';
+            res += wear('Head', helmet) + wear('Torso', chestplate) + wear('Legs', leggings) + wear('Feet', boots);
             if (!helmet && !chestplate && !leggings && !boots)
                 res += 'Nothing';
+
+            // 手持物品单独提示耐久，方便 AI 判断当前工具是否该换
+            if (bot.heldItem) {
+                const d = durabilityLabel(bot.heldItem);
+                res += `\nHolding: ${bot.heldItem.name}${d ? ` (耐久 ${d})` : ''}`;
+            }
 
             return pad(res);
         }

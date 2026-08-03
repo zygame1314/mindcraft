@@ -220,6 +220,14 @@ export async function craftRecipe(bot, itemName, num = 1) {
     const requiredIngredients = mc.ingredientsFromPrismarineRecipe(recipe); //Items required to use the recipe once.
     const craftLimit = mc.calculateLimitingResource(inventory, requiredIngredients);
 
+    if (craftLimit.num <= 0) {
+        log(bot, `材料不足，无法合成 ${itemName}。缺少: ${requiredIngredients.map(i => `${i.name} x${i.count}`).join(', ')}。`);
+        if (placedTable) {
+            try { await collectBlock(bot, 'crafting_table', 1); } catch (_) { }
+        }
+        return false;
+    }
+
     await bot.craft(recipe, Math.min(craftLimit.num, num), craftingTable);
     if (craftLimit.num < num) log(bot, `${craftLimit.limitingResource} 不够合成 ${num} 个，只合成了 ${craftLimit.num} 个。你现在有 ${world.getInventoryCounts(bot)[itemName]} 个 ${itemName}。`);
     else log(bot, `成功合成了 ${itemName}，你现在有 ${world.getInventoryCounts(bot)[itemName]} 个 ${itemName}。`);
@@ -644,10 +652,16 @@ export async function defendSelf(bot, range = 9) {
     bot.modes.pause('cowardice');
     const hasShield = await equipShield(bot);
     let attacked = false;
+    // 记录本轮自卫中"交过手"的敌人：进入循环时记下当前 target 名，
+    // 循环退出后这些敌人大多已被消灭（少数可能跑出 range）。用于结尾
+    // 输出"击杀了 zombie、skeleton"，让 AI 知道威胁已清除，不必再 !attack。
+    const foughtNames = [];
     let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
     if (hasShield && enemy) raiseShield(bot); // 进入战斗先举盾，覆盖到首次 attack 的空窗
     try {
         while (enemy) {
+            // 记名去重：同一敌人每轮都记会重复，只记第一次出现
+            if (!foughtNames.includes(enemy.name)) foughtNames.push(enemy.name);
             await equipHighestAttack(bot);
             if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
                 try {
@@ -675,9 +689,12 @@ export async function defendSelf(bot, range = 9) {
         if (hasShield) lowerShield(bot);
         bot.pvp.stop();
     }
-    if (attacked)
-        log(bot, `成功自卫。`);
-    else
+    if (attacked) {
+        // 循环退出意味着 range 内已无敌对生物。foughtNames 里的敌人要么被杀、
+        // 要么跑出 range（少见）。报告"清除"而非精确"击杀"，措辞更准确。
+        log(bot, `成功自卫，清除了 ${foughtNames.join('、')}，附近已无敌人。`);
+        try { await pickupNearbyItems(bot); } catch (_) { }
+    } else
         log(bot, `附近没有敌人需要自卫。`);
     return attacked;
 }
@@ -2286,6 +2303,13 @@ export async function goToGoal(bot, goal) {
         const id = mc.getBlockId(name);
         if (id != null) destructiveMovements.blocksCantBreak.add(id);
     }
+    // 提高 1x1 tower（原地放方块+跳上去）的代价：深坑脱困时 pathfinder 默认
+    // placeCost=1 太便宜，会优先选"原地搭方块上去"而不是"走旁边现成的 1 格台阶"。
+    // 但原地搭方块要 jump 到方块上才成功，bot 放了方块没跳上去时 monitorMovement
+    // 不会判失败、只反复重试同一动作，lastNodeTime 要等 3500ms 才判 stuck 重规划，
+    // 重规划又选同样的 tower move → 死循环卡很久。提高 placeCost 让它优先走现成台阶，
+    // 真无路可走时才会用 tower。
+    destructiveMovements.placeCost = 6;
 
     let final_movements = destructiveMovements;
 
@@ -2407,7 +2431,18 @@ export async function goToNearestBlock(bot, blockType, min_distance = 2, range =
         log(bot, `在 ${range} 格内没有找到任何 ${blockType}。`);
         return false;
     }
-    log(bot, `在 ${block.position} 找到了 ${blockType}。正在导航...`);
+    // 统计附近同类型方块数量，让 bot 知道矿脉规模（否则只报"找到1个"导致挖矿给数量1）
+    let count = 1;
+    try {
+        const all = world.getNearestBlocksWhere(bot, b => {
+            if (!b) return false;
+            if (b.name === blockType) return true;
+            if (!b.position) return false;
+            return b.position.x === block.position.x && b.position.y === block.position.y && b.position.z === block.position.z;
+        }, range, 128);
+        count = all.length > 0 ? all.length : 1;
+    } catch (_) {}
+    log(bot, `在 ${block.position} 找到了 ${blockType}（附近约 ${count} 个），正在导航...`);
     const reached = await goToPosition(bot, block.position.x, block.position.y, block.position.z, min_distance);
     return reached;
 }
@@ -3120,15 +3155,31 @@ export async function goToSurface(bot) {
      * @returns {Promise<boolean>} true if the surface was reached, false otherwise.
      **/
     const pos = bot.entity.position;
+    let surfaceY = null;
     for (let y = 360; y > -64; y--) { // probably not the best way to find the surface but it works
         const block = bot.blockAt(new Vec3(pos.x, y, pos.z));
         if (!block || block.name === 'air' || block.name === 'cave_air') {
             continue;
         }
-        await goToPosition(bot, block.position.x, block.position.y + 1, block.position.z, 0); // this will probably work most of the time but a custom mining and towering up implementation could be added if needed
-        log(bot, `正在前往 y=${y + 1} 的地表。`);
+        surfaceY = y + 1; // 站到该方块上方
+        break;
+    }
+    if (surfaceY == null) {
+        log(bot, `找不到当前位置上方的地表。`);
+        return false;
+    }
+    // 用 GoalY 而非 GoalNear(当前x,z,0)：从深坑回地表时，正上方那一列常被
+    // 2 格高墙挡住跳不上去，但周围有 1 格台阶可以逐级跳出。GoalNear 锁死到
+    // 当前 x,z 一列，pathfinder 只会死磕正前方的 2 高墙（跳不上去、挖也够
+    // 不到顶），耗到 unstuck 触发也不解决，最终卡死。GoalY 只要求到达该 y
+    // 层、不限 x/z，pathfinder 就能转向周围 1 格台阶逐级攀爬脱困。
+    await goToGoal(bot, new pf.goals.GoalY(surfaceY));
+    const distY = Math.abs(bot.entity.position.y - surfaceY);
+    if (distY < 2) {
+        log(bot, `已到达 y=${surfaceY} 的地表。`);
         return true;
     }
+    log(bot, `未能到达 y=${surfaceY} 的地表，当前 y=${bot.entity.position.y.toFixed(1)}。`);
     return false;
 }
 

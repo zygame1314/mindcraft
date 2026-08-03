@@ -310,7 +310,7 @@ export const actionsList = [
     },
     {
         name: '!collectBlocks',
-        description: 'Collect the nearest blocks of a given type.',
+        description: 'Collect the nearest blocks of a given type. For ores use the base name (e.g. "diamond", "iron", "coal"); deepslate variants are auto-included. Give the amount based on how many you found via !searchForBlock.',
         params: {
             'type': { type: 'BlockName', description: 'The block type to collect.' },
             'num': { type: 'int', description: 'The number of blocks to collect.', domain: [1, Number.MAX_SAFE_INTEGER] }
