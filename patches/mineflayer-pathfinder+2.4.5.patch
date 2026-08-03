@@ -1,5 +1,5 @@
 diff --git a/node_modules/mineflayer-pathfinder/index.js b/node_modules/mineflayer-pathfinder/index.js
-index b38bd30..a98f770 100644
+index b38bd30..63808fd 100644
 --- a/node_modules/mineflayer-pathfinder/index.js
 +++ b/node_modules/mineflayer-pathfinder/index.js
 @@ -14,6 +14,7 @@ const interactableBlocks = require('./lib/interactable.json')
@@ -37,14 +37,17 @@ index b38bd30..a98f770 100644
      lockEquipItem.release()
      lockPlaceBlock.release()
      lockUseBlock.release()
-@@ -170,6 +177,16 @@ function inject (bot) {
+@@ -170,6 +177,19 @@ function inject (bot) {
        const curPoint = path[i]
        if (curPoint.toBreak.length > 0 || curPoint.toPlace.length > 0) break
        const b = bot.blockAt(new Vec3(curPoint.x, curPoint.y, curPoint.z))
 +
-+      // openned doors have small Collision box
-+      // that may stop the bot from moving forward
-+      if(i === 0 && b?.name.includes('door')) {
++      // openned doors/gates have small Collision box that may stop the bot
++      // from moving forward. 居中到方块正中（0.5），避免 bot 走向方块角撞门框。
++      // 原版只对 i===0 且只 door 生效，改为所有已开门/栅栏门节点都居中（含 gate）。
++      if (b && stateMovements.openable.has(b.type) &&
++        (b.name.includes('door') || b.name.includes('gate')) &&
++        b._properties?.open === true) {
 +        curPoint.x = Math.floor(curPoint.x) + 0.5
 +        curPoint.y = Math.floor(curPoint.y)
 +        curPoint.z = Math.floor(curPoint.z) + 0.5
@@ -54,7 +57,7 @@ index b38bd30..a98f770 100644
        if (b && (b.type === waterType || ((b.type === ladderId || b.type === vineId) && i + 1 < path.length && path[i + 1].y < curPoint.y))) {
          curPoint.x = Math.floor(curPoint.x) + 0.5
          curPoint.y = Math.floor(curPoint.y)
-@@ -417,6 +434,14 @@ function inject (bot) {
+@@ -417,6 +437,14 @@ function inject (bot) {
    })
  
    function monitorMovement () {
@@ -69,15 +72,22 @@ index b38bd30..a98f770 100644
      // Test freemotion
      if (stateMovements && stateMovements.allowFreeMotion && stateGoal && stateGoal.entity) {
        const target = stateGoal.entity
-@@ -521,12 +546,24 @@ function inject (bot) {
+@@ -521,12 +549,31 @@ function inject (bot) {
        // Open gates or doors
        if (placingBlock?.useOne) {
          if (!lockUseBlock.tryAcquire()) return
 -        bot.activateBlock(bot.blockAt(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z))).then(() => {
-+        // 重置节点计时：开门有动画耗时，不应计入 stuck 判定（否则 3500ms
-+        // 到时会被 resetPath 打断，门还没开完就重新规划，又选同一条路 → 卡门循环）。
 +        lastNodeTime = performance.now()
 +        const doorBlock = bot.blockAt(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z))
++        // 若门当前已是开着的（规划时缓存显示关、但实际已开，或玩家已手动开过），
++        // 不要再 activateBlock——对已开门激活会把它关上，反而把 bot 关在门外。
++        // 直接跳过这个 useOne，不设冷却，让 bot 立即继续前进。
++        if (doorBlock && doorBlock._properties && doorBlock._properties.open === true) {
++          lockUseBlock.release()
++          placingBlock = nextPoint.toPlace.shift()
++          if (!placingBlock) placing = false
++          return
++        }
 +        bot.activateBlock(doorBlock).then(() => {
            lockUseBlock.release()
            placingBlock = nextPoint.toPlace.shift()
@@ -95,7 +105,7 @@ index b38bd30..a98f770 100644
          })
          return
        }
-@@ -550,6 +587,7 @@ function inject (bot) {
+@@ -550,6 +597,7 @@ function inject (bot) {
              lockEquipItem.release()
              const refBlock = bot.blockAt(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z), false)
              if (!lockPlaceBlock.tryAcquire()) return
@@ -103,7 +113,7 @@ index b38bd30..a98f770 100644
              if (interactableBlocks.includes(refBlock.name)) {
                bot.setControlState('sneak', true)
              }
-@@ -557,6 +595,7 @@ function inject (bot) {
+@@ -557,6 +605,7 @@ function inject (bot) {
                .then(function () {
                  // Dont release Sneak if the block placement was not successful
                  bot.setControlState('sneak', false)
@@ -111,7 +121,7 @@ index b38bd30..a98f770 100644
                  if (bot.pathfinder.LOSWhenPlacingBlocks && placingBlock.returnPos) returningPos = placingBlock.returnPos.clone()
                })
                .catch(_ignoreError => {
-@@ -576,7 +615,61 @@ function inject (bot) {
+@@ -576,7 +625,61 @@ function inject (bot) {
      let dx = nextPoint.x - p.x
      const dy = nextPoint.y - p.y
      let dz = nextPoint.z - p.z
@@ -174,17 +184,37 @@ index b38bd30..a98f770 100644
        // arrived at next point
        lastNodeTime = performance.now()
        if (stopPathing) {
-@@ -611,6 +704,9 @@ function inject (bot) {
-     if (bot.entity.isInWater) {
-       bot.setControlState('jump', true)
-       bot.setControlState('sprint', false)
-+    } else if (bot.entity.isInLava) {
+@@ -608,7 +711,28 @@ function inject (bot) {
+     bot.setControlState('forward', true)
+     bot.setControlState('jump', false)
+ 
+-    if (bot.entity.isInWater) {
++    // 已开的门/栅栏门直接放行：物理模拟器（canStraightLine/canWalkJump）读真实
++    // 方块碰撞 shapes，已开门的 thin 碰撞箱仍在引擎里，模拟判定被挡 → forward=false
++    // → bot 傻站门口直到 stuck 重规划。但已开门实际可通行（寻路 A* 已判 safe），
++    // 这里检测下一节点是已开门时强制 forward 绕过物理模拟判定。
++    let _isOpenDoorNode = false
++    try {
++      const _nb = bot.blockAt(new Vec3(nextPoint.x, nextPoint.y, nextPoint.z))
++      const _nu = bot.blockAt(new Vec3(nextPoint.x, nextPoint.y + 1, nextPoint.z))
++      const _chk = (b) => b && b.name && stateMovements.openable && stateMovements.openable.has(b.type) &&
++        (b.name.includes('door') || b.name.includes('gate')) && b._properties && b._properties.open === true
++      _isOpenDoorNode = _chk(_nb) || _chk(_nu)
++    } catch (_) { _isOpenDoorNode = false }
++
++    if (_isOpenDoorNode) {
++      bot.setControlState('forward', true)
++      bot.setControlState('jump', false)
++      bot.setControlState('sprint', false)
++      lastNodeTime = performance.now()
++    } else if (bot.entity.isInWater) {
 +      bot.setControlState('jump', true)
 +      bot.setControlState('sprint', false)
++    } else if (bot.entity.isInLava) {
+       bot.setControlState('jump', true)
+       bot.setControlState('sprint', false)
      } else if (stateMovements.allowSprinting && physics.canStraightLine(path, true)) {
-       bot.setControlState('jump', false)
-       bot.setControlState('sprint', true)
-@@ -631,7 +727,12 @@ function inject (bot) {
+@@ -631,7 +755,12 @@ function inject (bot) {
      // check for futility
      if (performance.now() - lastNodeTime > 3500) {
        // should never take this long to go to the next node
@@ -199,7 +229,7 @@ index b38bd30..a98f770 100644
    }
  }
 diff --git a/node_modules/mineflayer-pathfinder/lib/movements.js b/node_modules/mineflayer-pathfinder/lib/movements.js
-index a7e3505..3ae7193 100644
+index a7e3505..19aae8e 100644
 --- a/node_modules/mineflayer-pathfinder/lib/movements.js
 +++ b/node_modules/mineflayer-pathfinder/lib/movements.js
 @@ -50,7 +50,12 @@ class Movements {
@@ -249,7 +279,7 @@ index a7e3505..3ae7193 100644
  
      this.exclusionAreasStep = []
      this.exclusionAreasBreak = []
-@@ -230,8 +243,13 @@ class Movements {
+@@ -230,8 +243,18 @@ class Movements {
        }
      }
      b.climbable = this.climbables.has(b.type)
@@ -260,12 +290,17 @@ index a7e3505..3ae7193 100644
 +    const isOpenTrapdoor = this.openable.has(b.type) && b.name.includes('trapdoor') && b._properties?.open === true
 +    const isClosedTrapdoor = this.openable.has(b.type) && b.name.includes('trapdoor') && b._properties?.open !== true
 +    
-+    b.safe = (b.boundingBox === 'empty' || b.climbable || this.carpets.has(b.type) || isOpenTrapdoor) && !this.blocksToAvoid.has(b.type)
++    // 已开的门/栅栏门可通行：门的 boundingBox 即使开着也是 thin（非 'empty'），
++    // 原 safe 判定会判 false，导致 canStraightLine 物理模拟认为门挡路过不去 →
++    // bot 停在已开门前 forward=false 等到 stuck 重规划，表现为"门开了还卡片刻"。
++    // 已开门（open===true）应视为 safe，让模拟器和寻路都放行。
++    const isOpenDoor = this.openable.has(b.type) && (b.name.includes('door') || b.name.includes('gate')) && b._properties?.open === true
++    b.safe = (b.boundingBox === 'empty' || b.climbable || this.carpets.has(b.type) || isOpenTrapdoor || isOpenDoor) && !this.blocksToAvoid.has(b.type)
 +    b.physical = (b.boundingBox === 'block' && !this.fences.has(b.type)) || isClosedTrapdoor
      b.replaceable = this.replaceables.has(b.type) && !b.physical
      b.liquid = this.liquids.has(b.type)
      b.height = pos.y + dy
-@@ -284,6 +302,18 @@ class Movements {
+@@ -284,6 +307,18 @@ class Movements {
      cost += this.exclusionStep(block) // Is excluded so can't move or break
      cost += this.getNumEntitiesAt(block.position, 0, 0, 0) * this.entityCost
      if (block.safe) return cost
@@ -284,7 +319,7 @@ index a7e3505..3ae7193 100644
      if (!this.safeToBreak(block)) return 100 // Can't break, so can't move
      toBreak.push(block.position)
  
-@@ -387,9 +417,23 @@ class Movements {
+@@ -387,9 +422,44 @@ class Movements {
      cost += this.safeOrBreak(blockB, toBreak)
      if (cost > 100) return
  
@@ -307,10 +342,31 @@ index a7e3505..3ae7193 100644
 +          }
 +        }
 +      }
++      // 双开门：两扇门并排放置（沿垂直于行进方向排列）。只开正前方那一扇时，
++      // bot 的半个身体会撞到旁边关闭的那扇门导致卡住。检测左右并排（perpendicular
++      // 方向）是否也是同 type 的关闭门，是的话额外 push useOne 一并打开。
++      // perpendicular 方向：dir={x,0,z:0}→左右在 z 轴；dir={x:0,z}→左右在 x 轴。
++      const perpDirs = dir.x !== 0 ? [{ x: 0, z: 1 }, { x: 0, z: -1 }] : [{ x: 1, z: 0 }, { x: -1, z: 0 }]
++      for (const pd of perpDirs) {
++        const sideC = this.getBlock(node, dir.x + pd.x, 0, dir.z + pd.z)
++        // 只处理"同类型门且关闭"的并排门；栅栏门等单扇不算双开门
++        if (sideC && sideC.openable && sideC.type === blockC.type && !sideC._properties.open) {
++          toPlace.push({ x: node.x + dir.x + pd.x, y: node.y, z: node.z + dir.z + pd.z, dx: 0, dy: 0, dz: 0, useOne: true })
++          // 并排门的上半也要从 toBreak 移除（若有）
++          const sideB = this.getBlock(node, dir.x + pd.x, 1, dir.z + pd.z)
++          if (sideB && sideB.openable) {
++            for (let i = toBreak.length - 1; i >= 0; i--) {
++              if (toBreak[i].x === sideB.position.x && toBreak[i].y === sideB.position.y && toBreak[i].z === sideB.position.z) {
++                toBreak.splice(i, 1)
++              }
++            }
++          }
++        }
++      }
      } else {
        cost += this.safeOrBreak(blockC, toBreak)
        if (cost > 100) return
-@@ -554,6 +598,54 @@ class Movements {
+@@ -554,6 +624,54 @@ class Movements {
      neighbors.push(new Move(node.x, node.y + 1, node.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
    }
  
@@ -365,7 +421,7 @@ index a7e3505..3ae7193 100644
    // Jump up, down or forward over a 1 block gap
    getMoveParkourForward (node, dir, neighbors) {
      const block0 = this.getBlock(node, 0, -1, 0)
-@@ -656,8 +748,27 @@ class Movements {
+@@ -656,8 +774,27 @@ class Movements {
      this.getMoveDown(node, neighbors)
      this.getMoveUp(node, neighbors)
  

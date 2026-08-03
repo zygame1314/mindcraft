@@ -678,6 +678,28 @@ export const actionsList = [
         }
     },
     {
+        name: '!findChest',
+        description: '用自然语言描述需求，自动匹配最合适的已记箱子（embedding 语义匹配）。例：!findChest("我要放铁矿") !findChest("找点吃的")。返回箱子名+坐标+用途，可直接用名字调 !putInChest/!takeFromChest。',
+        params: { 'query': { type: 'string', description: '需求描述，如"存红石元件"、"拿武器去打架"。' } },
+        perform: async function (agent, query) {
+            if (!query) return '请描述你要找什么箱子，例：!findChest("存挖到的矿石")';
+            const emb = agent.prompter?.embedding_model || null;
+            const matches = await agent.memory_bank.findChestBySemantic(query, emb, 3);
+            if (matches.length === 0) {
+                return `没有匹配"${query}"的已记箱子。用 !viewNearbyChests 看附近实物箱子，或 !rememberChest 给箱子记用途。`;
+            }
+            const lines = [`匹配"${query}"的箱子（按相关度排序）：`];
+            for (const m of matches) {
+                const c = agent.memory_bank.recallChest(m.name);
+                const pos = c?.pos ? `(${c.pos[0]},${c.pos[1]},${c.pos[2]})` : '';
+                const purpose = (c?.purpose && c.purpose !== '用途未知') ? c.purpose : (c?.suggestedPurpose || '用途未知');
+                lines.push(`- ${m.name} ${pos} 用途:${purpose} 相关度:${(m.score * 100).toFixed(0)}%`);
+            }
+            lines.push(`用箱子名直接操作，例：!putInChest("oak_log", 10, "${matches[0].name}")`);
+            return lines.join('\n');
+        }
+    },
+    {
         name: '!rememberNote',
         description: '记一条自由文本笔记（关键事实、提醒、玩家偏好等），长期保留，不会随摘要覆盖丢失。例：!rememberNote("zygame1314喜欢生鱼")',
         params: { 'text': { type: 'string', description: '笔记内容，尽量简短。' } },

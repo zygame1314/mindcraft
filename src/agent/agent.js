@@ -17,6 +17,7 @@ import settings from './settings.js';
 import { Task } from './tasks/tasks.js';
 import { speak } from './speak.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
+import { cosineSimilarity } from '../utils/math.js';
 
 export class Agent {
     async start(load_mem=false, init_message=null, count_id=0) {
@@ -69,9 +70,12 @@ export class Agent {
         // 记忆钩子：skills.js 里的箱子操作在打开/存取后回调此函数，
         // 自动把箱子坐标记进 memory_bank（用途留空，待 AI 用 !rememberChest 命名）。
         // positions 支持双联箱：传数组时同时记两半坐标，findChestByPos 精确匹配任一。
+        // 第二个可选参数 items：开箱时拿到的物品列表（[{name,count}]），用于
+        // embedding 自动归类出"建议用途"，填进占位条目的 suggestedPurpose，
+        // 让玩家在 !viewNearbyChests / 记忆摘要里一眼看到建议，而不必 AI 擅自命名。
         const self = this;
         this.bot._memoryBank = this.memory_bank;
-        this.bot._recordChestMemory = (positionOrPositions) => {
+        this.bot._recordChestMemory = async (positionOrPositions, items = null) => {
             try {
                 if (!positionOrPositions) return;
                 // 统一成 positions 数组（单坐标或数组都支持）
@@ -87,10 +91,25 @@ export class Agent {
                     name = self.memory_bank.findChestByPos(...p);
                     if (name) break;
                 }
+                const isNewPlaceholder = !name;
                 if (!name) name = `箱子(${primary[0]},${primary[1]},${primary[2]})`;
                 if (name.startsWith('箱子(')) {
                     const exists = self.memory_bank.recallChest(name);
                     self.memory_bank.rememberChest(name, exists?.purpose || '用途未知', null, positions);
+                }
+                // embedding 自动归类：仅对占位箱子（箱子上没玩家命名/用途未知）且有物品列表时做。
+                // 已命名箱子不碰。归类结果写入 suggestedPurpose，不擅自改 purpose/名字。
+                // 失败静默（embedding 不可用 / 物品为空），不影响箱子操作主流程。
+                if (items && items.length > 0 && self.prompter?.embedding_model) {
+                    try {
+                        const c = self.memory_bank.recallChest(name);
+                        const needSuggest = c && (!c.purpose || c.purpose === '用途未知') && !c.suggestedPurpose;
+                        if (needSuggest) {
+                            const desc = items.map(it => `${it.count}个${it.name}`).join('、');
+                            const suggested = await classifyChestByEmbedding(self.prompter.embedding_model, desc);
+                            if (suggested) self.memory_bank.setSuggestedPurpose(name, suggested);
+                        }
+                    } catch (e) { /* embedding 失败不影响主流程 */ }
                 }
             } catch (e) {
                 console.warn('recordChestMemory error:', e.message);
@@ -599,5 +618,45 @@ export class Agent {
 
     killAll() {
         serverProxy.shutdown();
+    }
+}
+
+// --- 箱子内容 embedding 自动归类 ---
+// 用一组预设类别描述文本，和箱子内容物描述算 cosine 相似度，取最高分作为"建议用途"。
+// 只生成建议文本（如"存挖到的矿石和锭"），不替玩家命名/改 purpose，由玩家用
+// !rememberChest 确认。embedding 不可用时退回基于物品名的简单规则归类。
+// 预设类别覆盖 Minecraft 常见仓储分类；阈值过低（无明显匹配）返回 null，不硬塞建议。
+const CHEST_CATEGORY_CANDIDATES = [
+    '矿物箱：存挖到的矿石、原矿、锭、宝石、红石、煤炭等矿物和冶炼产物',
+    '食物箱：存食物、农作物、种子、肉类、面包、苹果等可食用和种植的东西',
+    '建材箱：存木材、圆石、泥土、沙子、圆石、木板、楼梯、玻璃等建筑方块',
+    '武器装备箱：存武器、盔甲、盾牌、箭矢、附魔书等战斗装备和耗材',
+    '工具箱：存镐子、斧头、铲子、锄头、鱼竿、打火石等工具',
+    '红石箱：存红石粉、红石火把、活塞、中继器、比较器、观察者等红石元件',
+    '杂物箱：存各种杂物、掉落物、探险战利品等没有固定分类的东西',
+];
+let _categoryEmbeddings = null; // 懒加载缓存类别向量
+
+async function classifyChestByEmbedding(embeddingModel, itemsDesc) {
+    if (!embeddingModel || !itemsDesc) return null;
+    try {
+        if (!_categoryEmbeddings) {
+            _categoryEmbeddings = {};
+            await Promise.all(CHEST_CATEGORY_CANDIDATES.map(async (cat) => {
+                _categoryEmbeddings[cat] = await embeddingModel.embed(cat);
+            }));
+        }
+        const itemVec = await embeddingModel.embed(itemsDesc);
+        let best = null, bestScore = -1;
+        for (const cat of CHEST_CATEGORY_CANDIDATES) {
+            const sim = cosineSimilarity(itemVec, _categoryEmbeddings[cat]);
+            if (sim > bestScore) { bestScore = sim; best = cat; }
+        }
+        // 阈值 0.25：低于此说明内容物和任何预设类别都不像，不硬塞建议
+        if (!best || bestScore < 0.25) return null;
+        // 只取类别前缀作为建议用途文本（如"矿物箱"），保持简洁
+        return best.split('：')[0];
+    } catch (e) {
+        return null;
     }
 }

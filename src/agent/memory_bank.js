@@ -10,6 +10,8 @@
 // 所有写入操作都返回简短描述，方便命令回显和后续 LLM 理解。
 // getSummary() 输出一份精简结构化摘要，供每轮对话 prompt 注入。
 
+import { cosineSimilarity as cosineSim } from '../utils/math.js';
+
 const MAX_NOTES = 40;      // notes 上限，超出按时间淘汰最旧的
 const MAX_NOTE_LEN = 240;  // 单条 note 最大长度
 
@@ -101,8 +103,22 @@ export class MemoryBank {
             pos: allPos ? allPos[0] : (old?.pos || null),
             positions: allPos && allPos.length > 1 ? allPos : undefined,
             purpose: clamp(purpose, 200),
+            // embedding 自动归类出的建议用途（不覆盖玩家填的 purpose）。
+            // 保留旧值，避免每次开箱重复算；显式传 null/skip 才不更新。
+            suggestedPurpose: old?.suggestedPurpose,
             ts: Date.now(),
         };
+        return true;
+    }
+
+    // 给已存在箱子写入 embedding 自动归类的建议用途。
+    // 仅当箱子是占位（purpose 为"用途未知"或空）且玩家没命名时才写入 suggestedPurpose，
+    // 已命名箱子不覆盖。返回是否写入成功。
+    setSuggestedPurpose(name, suggested) {
+        const c = this.chests[name];
+        if (!c) return false;
+        if (suggested == null) return false;
+        c.suggestedPurpose = clamp(suggested, 200);
         return true;
     }
 
@@ -131,6 +147,54 @@ export class MemoryBank {
     forgetChest(name) {
         if (this.chests[name]) { delete this.chests[name]; return true; }
         return false;
+    }
+
+    // 语义匹配箱子：用 embedding 把 query（玩家自然语言需求）和每个箱子的
+    // "用途文本"做相似度，返回最匹配的箱子名 + 分数。用途文本优先用玩家填的
+    // purpose，其次用 embedding 自动归类的 suggestedPurpose，都没有跳过。
+    // embeddingModel 为 null 时退回关键词包含匹配（fallback）。
+    // 返回 [{ name, score, pos }] 按 score 降序，最多 limit 条。
+    async findChestBySemantic(query, embeddingModel, limit = 3) {
+        const entries = [];
+        for (const name in this.chests) {
+            const c = this.chests[name];
+            if (!c.pos) continue;
+            // 跳过占位占位条目本身（箱子(x,y,z) 且无 purpose/suggestedPurpose）
+            const isPlaceholder = name.startsWith('箱子(') &&
+                (!c.purpose || c.purpose === '用途未知') && !c.suggestedPurpose;
+            if (isPlaceholder) continue;
+            entries.push({ name, text: c.purpose && c.purpose !== '用途未知' ? c.purpose : (c.suggestedPurpose || '') });
+        }
+        if (entries.length === 0) return [];
+
+        if (!embeddingModel) {
+            // fallback：关键词包含
+            const q = (query || '').toLowerCase();
+            const scored = entries
+                .map(e => ({ name: e.name, score: e.text.toLowerCase().includes(q) || q.includes(e.text.toLowerCase()) ? 1 : 0, pos: this.chests[e.name].pos }))
+                .filter(e => e.score > 0)
+                .sort((a, b) => b.score - a.score);
+            return scored.slice(0, limit);
+        }
+        try {
+            const qVec = await embeddingModel.embed(query);
+            const scored = [];
+            for (const e of entries) {
+                if (!e.text) continue;
+                const v = await embeddingModel.embed(e.text);
+                const sim = cosineSim(qVec, v);
+                scored.push({ name: e.name, score: sim, pos: this.chests[e.name].pos });
+            }
+            scored.sort((a, b) => b.score - a.score);
+            return scored.slice(0, limit);
+        } catch (err) {
+            // embedding 失败，退回关键词
+            const q = (query || '').toLowerCase();
+            return entries
+                .filter(e => e.text.toLowerCase().includes(q))
+                .map(e => ({ name: e.name, score: 1, pos: this.chests[e.name].pos }))
+                .slice(0, limit);
+        }
     }
 
     // ---------- 笔记 ----------
@@ -223,7 +287,12 @@ export class MemoryBank {
                 } else if (c.pos) {
                     line += ` ${coordStr(c.pos)}`;
                 }
-                if (c.purpose) line += ` 用途:${c.purpose}`;
+                if (c.purpose && c.purpose !== '用途未知') {
+                    line += ` 用途:${c.purpose}`;
+                } else if (c.suggestedPurpose) {
+                    // 占位箱子没玩家命名，显示 embedding 建议用途供玩家确认
+                    line += ` 建议用途:${c.suggestedPurpose}（未确认，可 !rememberChest 命名）`;
+                }
                 lines.push(line);
             }
         }

@@ -1323,6 +1323,22 @@ export async function discard(bot, itemName, num = -1) {
      * @example
      * await skills.discard(bot, "oak_log");
      **/
+    // 副手(slot 45)里的物品不在 findInventoryItem 的搜索范围(9~44)内，
+    // 会导致盾牌/副手食物等既丢不出也给不了玩家。先把副手同名物品卸回主背包。
+    const OFF_HAND_SLOT = 45;
+    const offHand = bot.inventory.slots[OFF_HAND_SLOT];
+    if (offHand && (offHand.name === itemName || mc.getItemId(itemName) === offHand.type)) {
+        try { await bot.unequip('off-hand'); }
+        catch (err) { log(bot, `无法把 ${itemName} 从副手取回：${err}。`); }
+    }
+    // 主手同理：findInventoryItem 能找到主手物品，但 bot.toss 对当前手持物品
+    // 有时丢出数量/动画异常，先卸回主背包更稳妥。
+    const heldItem = bot.heldItem;
+    if (heldItem && (heldItem.name === itemName || mc.getItemId(itemName) === heldItem.type)) {
+        try { await bot.unequip('hand'); }
+        catch (_) { }
+    }
+
     let discarded = 0;
     while (true) {
         let item = bot.inventory.findInventoryItem(itemName);
@@ -1553,7 +1569,8 @@ export async function viewNearbyChests(bot, range = 32) {
             results.push({ positions, status: dist > 5 ? 'unreachable' : 'fail', dist });
             continue;
         }
-        bot._recordChestMemory?.(positions);
+        // 把物品列表一起传给记忆钩子：对占位箱子做 embedding 自动归类，生成建议用途
+        await bot._recordChestMemory?.(positions, items);
         results.push({ positions, status: 'ok', items });
     }
 
@@ -1564,6 +1581,14 @@ export async function viewNearbyChests(bot, range = 32) {
         if (!mb) return null;
         const n = mb.findChestByPos(pos.x, pos.y, pos.z);
         return n && !n.startsWith('箱子(') ? n : null;
+    };
+    // 取占位箱子的 embedding 建议用途（玩家未命名时显示，供确认）
+    const suggestedAt = (pos) => {
+        if (!mb) return null;
+        const n = mb.findChestByPos(pos.x, pos.y, pos.z);
+        if (!n || !n.startsWith('箱子(')) return null;
+        const c = mb.recallChest(n);
+        return c?.suggestedPurpose || null;
     };
     const lines = [`附近 ${range} 格内共 ${containers.length} 个箱子：`];
     for (const r of results) {
@@ -1580,7 +1605,14 @@ export async function viewNearbyChests(bot, range = 32) {
             const n = nameAt(p);
             if (n) { remembered = n; break; }
         }
-        const tag = remembered ? `[${remembered}]` : '[未命名]';
+        let suggested = null;
+        if (!remembered) {
+            for (const p of r.positions) {
+                const s = suggestedAt(p);
+                if (s) { suggested = s; break; }
+            }
+        }
+        const tag = remembered ? `[${remembered}]` : (suggested ? `[未命名/建议:${suggested}]` : '[未命名]');
         if (r.status === 'unreachable') {
             lines.push(`- (${coord}) ${tag} 无法到达（${r.dist.toFixed(1)}格）`);
         } else if (r.status === 'fail') {
@@ -1609,7 +1641,7 @@ export async function viewNearbyChests(bot, range = 32) {
     if (buf.trim()) log(bot, buf.trimEnd());
     const unnamed = results.filter(r => r.status === 'ok' && !nameAt(r.positions[0])).length;
     if (unnamed > 0) {
-        log(bot, `提示：${unnamed} 个箱子还没命名，用 !rememberChest("名字","用途",x,y,z) 记一下用途。`);
+        log(bot, `提示：${unnamed} 个箱子还没命名，用 !rememberChest("名字","用途",x,y,z) 记一下用途（有"建议用途"的可参考命名）。`);
     }
     return true;
 }
