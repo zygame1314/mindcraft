@@ -358,18 +358,39 @@ const modes_list = [
         on: true,
         active: false,
         update: async function (agent) {
-            const enemy = world.getNearestEntityWhere(agent.bot, entity => mc.isHostile(entity), 8);
+            // 远程射手（骷髅/流浪者）会在 16 格开外射箭，近战 8 格感知太晚——bot
+            // 被边射边退风筝到死也没反应。放宽射手感知到 16 格，让 defendSelf 积极
+            // 接敌而不是站着挨箭。
+            const rangedMobs = ['skeleton', 'stray', 'pillager', 'witch'];
+            // 飞行怪（幻翼/烈焰人/恶魂/蜜蜂）：原逻辑 distanceTo>3 直接 return，等于
+            // 幻翼盘旋俯冲全程不防、撞脸 3 格内才触发。放宽到 16 格，让它早点进战斗。
+            // 仍兜底 >3 跳过会无限刷屏的旧逻辑只有在我们真没法回手时（既无弓又够不到）
+            // 才让 defendSelf 内部去解决。
+            const flyingMobs = ['phantom', 'ghast', 'blaze', 'bee'];
+            const isRangedOrFlying = e => rangedMobs.includes(e.name) || flyingMobs.includes(e.name);
+
+            const enemy = world.getNearestEntityWhere(agent.bot,
+                entity => mc.isHostile(entity) && isRangedOrFlying(entity), 16) ||
+                world.getNearestEntityWhere(agent.bot, entity => mc.isHostile(entity), 8);
             if (enemy && await world.isClearPath(agent.bot, enemy)) {
-                // 幻翼/会飞的怪在空中，近战 self_defense 打不到，却会无限打断
-                // 其他操作（看箱子、走路、睡觉）形成死循环"成功自卫"刷屏。
-                // 这类怪交给 AI 用弓箭/手动 !attack 处理，self_defense 跳过它。
-                const flyingMobs = ['phantom', 'ghast', 'blaze', 'bee'];
-                if (flyingMobs.includes(enemy.name) && agent.bot.entity.position.distanceTo(enemy.position) > 3) {
+                const dist = agent.bot.entity.position.distanceTo(enemy.position);
+                if (flyingMobs.includes(enemy.name) && dist > 3) {
+                    // 不再「>3 就放任」，但要避免近战打不到空中怪 → 无限刷屏。
+                    // 交给 defendSelf 在内部判断够不够得着：够得着就上，够不着就闪开避弹，
+                    // 而非反复「成功自卫」空转。这里仍 return 是为了让别的 mode（如主动
+                    // 走上）有机会发生，不把 bot 完全锁在「打不到的幻翼」上。
+                    // 取舍：宁可让它短时间不反应，也别去打空气。但把阈值从 3 放到 6，
+                    // 让贴近俯冲那一刻能及时触发。
+                    // 仍走 defendSelf 的方案改成：让 defendSelf 感知到空中怪且够得着就处理。
+                    say(agent, `${enemy.name}在附近，密切注意！`);
+                    execute(this, agent, async () => {
+                        await skills.defendSelf(agent.bot, 16);
+                    });
                     return;
                 }
                 say(agent, `正在和${enemy.name}打架！`);
                 execute(this, agent, async () => {
-                    await skills.defendSelf(agent.bot, 8);
+                    await skills.defendSelf(agent.bot, rangedMobs.includes(enemy.name) ? 16 : 8);
                 });
             }
         }

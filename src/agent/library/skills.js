@@ -596,6 +596,24 @@ export async function attackNearest(bot, mobType, kill = true) {
     return false;
 }
 
+// auto-eat（mineflayer-auto-eat）会在任意 tick 触发，打架时它调用
+// bot.activateItem 吃食物会抢断 mineflayer-pvp 的攻击节拍：pvp 用
+// activateItem/deactivateItem 控盾，同时举盾又吃食物会让攻击瞬间手持
+// 食物而非武器、漏掉攻击节拍。所以在 pvp 进行期间临时 disable，
+// 结束后恢复。饥饿值不会因为这几秒暴涨，回来再吃即可。
+function pauseAutoEat(bot) {
+    if (bot.autoEat && !bot.autoEat.disabled) {
+        bot.autoEat.disable();
+        return true;
+    }
+    return false;
+}
+function resumeAutoEat(bot, wasEnabled) {
+    if (wasEnabled && bot.autoEat && bot.autoEat.disabled) {
+        bot.autoEat.enable();
+    }
+}
+
 export async function attackEntity(bot, entity, kill = true) {
     /**
      * Attack mob of the given type.
@@ -611,15 +629,21 @@ export async function attackEntity(bot, entity, kill = true) {
     const hasShield = await equipShield(bot);
 
     if (!kill) {
-        if (bot.entity.position.distanceTo(pos) > 5) {
-            console.log('moving to mob...')
-            await goToPosition(bot, pos.x, pos.y, pos.z);
+        const ate = pauseAutoEat(bot);
+        try {
+            if (bot.entity.position.distanceTo(pos) > 5) {
+                console.log('moving to mob...')
+                await goToPosition(bot, pos.x, pos.y, pos.z);
+            }
+            console.log('attacking mob...')
+            if (hasShield) lowerShield(bot);
+            await bot.attack(entity);
+        } finally {
+            resumeAutoEat(bot, ate);
         }
-        console.log('attacking mob...')
-        if (hasShield) lowerShield(bot);
-        await bot.attack(entity);
     }
     else {
+        const ate = pauseAutoEat(bot);
         if (hasShield) raiseShield(bot);
         bot.pvp.attack(entity);
         try {
@@ -632,11 +656,31 @@ export async function attackEntity(bot, entity, kill = true) {
             }
         } finally {
             if (hasShield) lowerShield(bot);
+            resumeAutoEat(bot, ate);
         }
         log(bot, `成功击杀了 ${entity.name}。`);
         await pickupNearbyItems(bot);
         return true;
     }
+}
+
+// 在 range 内按威胁度选当前最该打的敌对实体。
+// getNearbyEntities 已按距离升序，我们再对其中敌对实体按 threatScoreWithBot 排序，
+// 取最高分者为下一目标。同分时 getNearbyEntities 的距离序保留——即"同样危险先打近的"。
+// 返回 null 表示 range 内已无敌对实体。
+function getMostThreateningHostile(bot, range) {
+    const hostiles = world.getNearbyEntities(bot, range).filter(e => mc.isHostile(e));
+    if (hostiles.length === 0) return null;
+    let best = null;
+    let bestScore = -Infinity;
+    for (const e of hostiles) {
+        const s = mc.threatScoreWithBot(bot, e);
+        if (s > bestScore) {
+            bestScore = s;
+            best = e;
+        }
+    }
+    return best;
 }
 
 export async function defendSelf(bot, range = 9) {
@@ -651,43 +695,190 @@ export async function defendSelf(bot, range = 9) {
     bot.modes.pause('self_defense');
     bot.modes.pause('cowardice');
     const hasShield = await equipShield(bot);
+    const ate = pauseAutoEat(bot); // 自卫全程禁吃，避免抢断 pvp 攻击节拍
     let attacked = false;
     // 记录本轮自卫中"交过手"的敌人：进入循环时记下当前 target 名，
     // 循环退出后这些敌人大多已被消灭（少数可能跑出 range）。用于结尾
     // 输出"击杀了 zombie、skeleton"，让 AI 知道威胁已清除，不必再 !attack。
     const foughtNames = [];
-    let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
+    // 按威胁度选目标而非"最近"：一群怪里优先打当前最危险的（冲刺苦力怕 > 大史莱姆
+    // > 贴脸怪 > 远程射手 > 普通怪），避免被贴脸苦力怕炸却去砍远处僵尸。
+    // getMostThreateningHostile 在 range 内按 threatScoreWithBot 排序返回第一名。
+    let enemy = getMostThreateningHostile(bot, range);
     if (hasShield && enemy) raiseShield(bot); // 进入战斗先举盾，覆盖到首次 attack 的空窗
+    // 围攻锁定目标：围攻时威胁度排序会频繁换目标，而 bot.pvp.attack(新目标)
+    // 内部 setGoal(GoalFollow(新目标)) 会把 bot 反复拽向怪堆、抵消我们的后撤 goal。
+    // 故围攻期间锁定首个高威胁目标不换，直到它消失/死亡，再重选下一个。
+    let lockedEnemy = null;
+    let lockCount = 0;
+    // 围攻状态滞后：meleeHostiles 在 2 上下抖动时（怪群走走停停），surrounded 会
+    // 在 true/false 间跳变，bot 每跳就切换「手控后退」/「pathfinder 追杀」，
+    // 追杀那一下 goal follow(name) 又把 bot 拽进怪堆——这就是「撤一会又送进怪堆」。
+    // 用 unSurroundCounter 滞回：进入围攻立即生效；要连续 ≥3 轮都不围攻才认为真的脱困，
+    // 否则保持围攻手控后退。
+    let unSurroundCounter = 0;
     try {
         while (enemy) {
             // 记名去重：同一敌人每轮都记会重复，只记第一次出现
             if (!foughtNames.includes(enemy.name)) foughtNames.push(enemy.name);
             await equipHighestAttack(bot);
-            if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
-                try {
-                    bot.pathfinder.setMovements(new pf.Movements(bot));
-                    await bot.pathfinder.goto(new pf.goals.GoalFollow(enemy, 3.5), true);
-                } catch (err) {/* might error if entity dies, ignore */ }
+
+            // —— 围攻感知（带滞后） ——
+            const meleeHostiles = world.getNearbyEntities(bot, 6)
+                .filter(e => mc.isHostile(e) && e.name !== 'skeleton' && e.name !== 'stray');
+            const instantlySurrounded = meleeHostiles.length >= 2;
+            let surrounded;
+            if (instantlySurrounded) {
+                surrounded = true;
+                unSurroundCounter = 0;
+            } else if (unSurroundCounter > 0) {
+                // 已处于围攻保持期，本轮未围仍算围（滞回）
+                surrounded = true;
+                unSurroundCounter--;
+            } else {
+                surrounded = false;
             }
-            if (bot.entity.position.distanceTo(enemy.position) <= 2) {
+
+            if (surrounded) {
+                // 锁定目标：围攻里换目标会让 pvp.attack 内部 setGoal(前移) 反复触发，
+                // 立刻覆盖掉我们设的后撤 goal，bot 就一直往怪堆凑。锁定一个目标不换，
+                // pvp 不会重复 setGoal，我们的 GoalInvert 才能真正生效。
+                if (!lockedEnemy || !world.getNearbyEntities(bot, range).includes(lockedEnemy)) {
+                    lockedEnemy = enemy;
+                    lockCount = 0;
+                }
+                // 已锁定目标还活着且没换目标时再坚持一段距离，避免：怪被砍退两步就退出射程
+                // 又换更近的怪造成回旋。
+                if (lockedEnemy) {
+                    enemy = lockedEnemy;
+                    lockCount++;
+                }
+
+                // 主动后撤：手控按 'back' 键倒退 + 每轮 lookAt(目标)，不交给 pathfinder。
+                // 关键根因：pathfinder.setGoal(GoalInvert) 走人时每 tick 把朝向拧向「下一个
+                // 路径点」（怪群后方），bot 背对怪群 → 盾牌只挡正面 180°、防不住身后侧脸，
+                // 攻击也朝错方向。改成老玩家 backpedal：始终面向怪按 S 倒退，盾正对怪群，
+                // pvp 出刀也朝怪，一举解决『视角看别处、盾防不住』。
+                // 不清空 pathfinder 的 goal 也行，但保险起见先 stop，避免它残留 GoalFollow
+                // 把 bot 往前拽、与 back 互相拉扯。
                 try {
-                    bot.pathfinder.setMovements(new pf.Movements(bot));
-                    let inverted_goal = new pf.goals.GoalInvert(new pf.goals.GoalFollow(enemy, 2));
-                    await bot.pathfinder.goto(inverted_goal, true);
-                } catch (err) {/* might error if entity dies, ignore */ }
+                    bot.pathfinder.stop();
+                } catch (err) { }
+                bot.setControlState('back', true);
+                bot.setControlState('sprint', false);
+                // 始终看着目标：比 pvp 的 lookAt 更频繁，覆盖任何剩余朝向扰动。
+                // force=true 立刻应用，不等插值。
+                try {
+                    await bot.lookAt(enemy.position.offset(0, enemy.height / 2, 0), true);
+                } catch (err) { }
+
+                // 边撤边打：pvp 只砍锁定的一个目标，围攻时其余怪也会从两侧/身后挤进来
+                // （至今贴到 ≤2.5），手动对它们也出刀。Minecraft 剑挥带横扫/裂刃判定，
+                // 一次 swing 能波及身侧附近怪，压住挤上来的，配合后撤把它们打散。
+                try {
+                    const others = meleeHostiles.filter(e => e !== enemy &&
+                        bot.entity.position.distanceTo(e.position) <= 3.5);
+                    for (const o of others) {
+                        bot.attack(o).catch(() => { });
+                    }
+                } catch (err) { /* attack 异常忽略，主目标 pvp 还在打 */ }
+
+                // 围攻分支末尾：不要 bot.pvp.attack(enemy)！
+                // 虽 然 pvp.attack 同目标首句 `if(target===this.target) return` 跳过，
+                // 但每轮 aimRef `enemy` 经锁定可能引用变化就变成新目标，
+                // 这时 pvp.attack 内部 setGoal(GoalFollow(新目标)) 又把 bot 往前拽，
+                // 立刻抵消 back 倒退「切到怪堆」就是「撤一会又冲进去」的根因。
+                // 改成第一条 round 调 pvp.attack 设置 this.target，且必须确保后续
+                // 不再 setGoal 諒 `bot.pathfinder.stop()` 已清干净；attemptAttack 仍按
+                // physicsTick 跑具熟于Attack 范围里出剑。我们将这一段塞进「首次设
+                // target」的前提。
+                if (!bot.pvp.target) {
+                    try { bot.pvp.attack(enemy); } catch (_) { }
+                }
             }
-            bot.pvp.attack(enemy);
+            else {
+                lockedEnemy = null;
+                // 单怪不再是围攻：松开 back 倒退键，恢复正常寻路追杀（forward）
+                bot.setControlState('back', false);
+                const dist = bot.entity.position.distanceTo(enemy.position);
+                const rangedMobs = ['skeleton', 'stray', 'pillager', 'witch'];
+                const flyingMobs = ['phantom', 'ghast', 'blaze', 'bee'];
+                const isRanged = rangedMobs.includes(enemy.name);
+                const isFlying = flyingMobs.includes(enemy.name);
+
+                if (isRanged) {
+                    // 远程射手会边射边退风筝 bot，不愿让 bot 贴近。原逻辑 dist>=4 才
+                    // GoalFollow(3.5)：骷髅一直 7-10 格射箭，bot 一直凑不到进 attackRange
+                    // 就在那挨射。改成 range=1 强制贴脸（路径寻找会尽量追到骷髅脚下），
+                    // 且不再 ≤2 后撤——远程怪就是要主动凑近贴死。
+                    if (dist >= 2.5) {
+                        try {
+                            const m = new pf.Movements(bot);
+                            m.allowSprinting = true; // 追骷髅得能冲刺，否则被永远风筝
+                            bot.pathfinder.setMovements(m);
+                            await bot.pathfinder.goto(new pf.goals.GoalFollow(enemy, 2), true);
+                        } catch (err) {/* might error if entity dies, ignore */ }
+                    }
+                    // 进到攻击范围就出刀，pvp.attack 处理
+                }
+                else if (isFlying) {
+                    // 飞行怪在空中俯冲。GoalFollow 的 isEnd 用 3D 距离，bot 站到幻翼下方
+                    // 的同 y 高度上跳起来挥剑，能在幻翼下冲时砍到。需配合可搭方块/可跳的
+                    // movements，让 bot 主动往上够。够不到时至少别站桩挨撞→保持瞄准跟随。
+                    if (dist >= 2.5) {
+                        try {
+                            const m = new pf.Movements(bot);
+                            m.allowSprinting = true;
+                            // 让 bot 朝空中怪 xz 跟随，y 由 pathfinder 自己爬坡/跳
+                            bot.pathfinder.setMovements(m);
+                            await bot.pathfinder.goto(new pf.goals.GoalFollow(enemy, 2), true);
+                        } catch (err) {/* might error if entity dies, ignore */ }
+                    }
+                    // 朝空中的怪保持看向，便于俯冲那一刻及时出刀（pvp.attack 会自己 lookAt）
+                    try {
+                        await bot.lookAt(enemy.position.offset(0, enemy.height / 2, 0), true);
+                    } catch (_) { }
+                }
+                else {
+                    // 普通近战：维持原逻辑追到 3.5、≤2 再微退
+                    if (dist >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
+                        try {
+                            bot.pathfinder.setMovements(new pf.Movements(bot));
+                            await bot.pathfinder.goto(new pf.goals.GoalFollow(enemy, 3.5), true);
+                        } catch (err) {/* might error if entity dies, ignore */ }
+                    }
+                    if (dist <= 2) {
+                        try {
+                            bot.pathfinder.setMovements(new pf.Movements(bot));
+                            let inverted_goal = new pf.goals.GoalInvert(new pf.goals.GoalFollow(enemy, 2));
+                            await bot.pathfinder.goto(inverted_goal, true);
+                        } catch (err) {/* might error if entity dies, ignore */ }
+                    }
+                }
+                // 单怪分支：靠 pvp.attack 设 GoalFollow 出刀。
+                try { bot.pvp.attack(enemy); } catch (_) { }
+            }
             attacked = true;
             await new Promise(resolve => setTimeout(resolve, 500));
-            enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
+            // 围攻时已锁定 lockedEnemy，别按威胁度重选——重选会让 pvp.attack 换目标、
+            // 内部重新 setGoal(GoalFollow) 把 bot 拽回怪堆，抵消后撤。锁定目标死/跑出
+            // range 后（上方围攻分支已检测 includes(lockedEnemy) 失效就清空）才允许重选。
+            if (surrounded && lockedEnemy && world.getNearbyEntities(bot, range).includes(lockedEnemy)) {
+                enemy = lockedEnemy;
+            } else {
+                enemy = getMostThreateningHostile(bot, range);
+            }
             if (bot.interrupt_code) {
                 bot.pvp.stop();
                 return false;
             }
         }
     } finally {
+        // 清理围攻时按下的 back 倒退键，避免离开战斗后 bot 仍一直倒退
+        bot.setControlState('back', false);
         if (hasShield) lowerShield(bot);
         bot.pvp.stop();
+        resumeAutoEat(bot, ate);
     }
     if (attacked) {
         // 循环退出意味着 range 内已无敌对生物。foughtNames 里的敌人要么被杀、

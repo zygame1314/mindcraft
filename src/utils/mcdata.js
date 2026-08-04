@@ -194,6 +194,103 @@ export function isHostile(mob) {
     return  (mob.type === 'mob' || mob.type === 'hostile') && mob.name !== 'iron_golem' && mob.name !== 'snow_golem';
 }
 
+/**
+ * 当前威胁度评分：数值越大越该优先处理。用于 defendSelf 在一群敌人里
+ * 选「现在最该打/最该躲」的目标，而不是无脑打最近的。
+ *
+ * 评分要素（由高到低权重）：
+ *  1. 正在冲刺/即将爆炸的苦力怕      → 1000（必须立刻挡/拉开，否则被炸）
+ *  2. 史莱姆/岩浆怪按体型大→小       → 100/35/12（大的伤害高且还在分裂增兵，
+ *     优先清掉大怪，避免越打越多）
+ *  3. 近距离（≤2.5）贴脸的近战怪     → +150（已经在打 bot 了，比远处那个急）
+ *  4. 苦力怕本身                     → +80（即使没冲刺，也比普通怪危险）
+ *  5. 亡灵射手（骷髅/流浪者）        → +60（远程持续消耗，不近身也在输出）
+ *  6. 其余普通怪基础分 10
+ *
+ * 史莱姆/岩浆怪同一名字分多种 size，mineflayer 用 metadata 区分体型：
+ *  entity.metadata[10]（1.19+ 有的版本改成其他 index，这里兼容性取，取不到就按名字兜底）。
+ * 取不到元数据时按名字区分：slime 本身是 size，magma_cube 同理。
+ *
+ * 返回 0 表示这不是敌对生物（调用方应已用 isHostile 过滤，但仍兜底返回 0）。
+ */
+export function threatScore(mob) {
+    if (!mob || !mob.name) return 0;
+    const name = mob.name;
+
+    // 苦力怕冲刺/爆炸判定：metadata[16] 为 1 表示正在引爆（与 pvp checkExplosion 一致）
+    let creeperSizzling = false;
+    try {
+        if (name === 'creeper' && mob.metadata && mob.metadata[16] === 1) {
+            creeperSizzling = true;
+        }
+    } catch (_) { }
+
+    if (creeperSizzling) return 1000;
+
+    let score = 10;
+
+    // 史莱姆 / 岩浆怪按体型加分：大的伤害高且分裂会增兵，先清大的。
+    // mineflayer 中 slime/magma_cube 的 size 存在 metadata 里；不同版本 index
+    // 不一致，这里多个常见 index 都试，取不到就退一步按“是否带 size 名/经验值”估算。
+    if (name === 'slime' || name === 'magma_cube') {
+        let size = 1;
+        try {
+            for (const idx of [8, 10, 14, 16]) {
+                const v = mob.metadata?.[idx];
+                if (typeof v === 'number' && v >= 0 && v <= 4) { size = v; break; }
+            }
+        } catch (_) { }
+        // size=0/1 是最小档：小史莱姆不掉血且既推不动 bot 也几乎打不动（mc 测试伤害 0），
+        // 视为「无害而烦人」。给极低分甚至 0，大幅低于普通怪，避免被这只无害垃圾优先攻击
+        // 而错过旁边真实威胁。size=2 中等怪伤害一般，size 3/4 大怪伤害高会分裂增兵。
+        score = [0, 2, 35, 100, 120][size] ?? 2;
+    }
+
+    // 苦力怕（未冲刺）整体偏高：贴脸也会炸，比普通近战更危险
+    if (name === 'creeper') score += 80;
+
+    // 远程输出怪：即便不贴脸也在持续输出（骷髅/流浪者射箭、掠夺者射弩、女巫扔药水）。
+    // 优先级必须高于大史莱姆（100）——否则 bot 会去砍大史莱姆而被掠夺者射穿。
+    // 基础分 10 + 这里加 120 = 130，稳压大史莱姆的 100。
+    // （骷髅马自身不会攻击，是骑它的骷髅在打，故剔除 skeleton_horse。）
+    if (name === 'skeleton' || name === 'stray' || name === 'pillager' || name === 'witch') score += 120;
+
+    // 贴脸近战加成：已经在 attack 范围内打 bot 的最急
+    let dist = 999;
+    try { dist = mob.position?.distanceTo ? mob.position.distanceTo(this?.entity?.position ?? mob.position) : 999; } catch (_) { }
+    // 上面的 this 在普通函数调用里不可靠，距离加成改由调用方传入会更准；
+    // 但 defendSelf 调用处已有 bot 可用，这里留个兜底：取不到就不加，避免误判。
+    return score;
+}
+
+/**
+ * 给定 bot 和一个敌对实体，返回带距离加成后的威胁分。
+ * 调用方已有 bot，比 threatScore 内部更能准确算距离。
+ */
+export function threatScoreWithBot(bot, mob) {
+    let base = threatScore(mob);
+    if (!bot || !mob?.position) return base;
+    let dist = 999;
+    try { dist = mob.position.distanceTo(bot.entity.position); } catch (_) { }
+    const rangedMobs = ['skeleton', 'stray', 'pillager', 'witch'];
+    const flyingMobs = ['phantom', 'ghast', 'blaze', 'bee'];
+    const isRanged = rangedMobs.includes(mob.name);
+    const isFlying = flyingMobs.includes(mob.name);
+    const isMostlyHarmless = base <= 2; // 小史莱姆等几乎无伤害的怪，不计贴脸加成
+
+    if (dist <= 2.5) base += isMostlyHarmless ? 5 : 150;  // 贴脸近战在打 bot；无伤害的顶多 +5
+    else if (dist <= 6) base += isMostlyHarmless ? 2 : 40; // 近距离；无伤害的几乎 +0
+    else if (dist >= 12) {
+        // 远的怪对普通近战暂时不构成威胁，略微降权；但远程射手/飞行怪即便在 16 格
+        // 外也在持续输出/越拖越不利，绝不能降权——否则 bot 在打近战僵尸时被远处
+        // 骷髅射穿都不改打目标。对它们保持稳定权重且略升（风筝越久越要脱战去处理）。
+        if (isRanged) base += 30;
+        else if (isFlying) base += 20;
+        else base -= 10;
+    }
+    return base;
+}
+
 // blocks that don't work with collectBlock, need to be manually collected
 export function mustCollectManually(blockName) {
     // all crops (that aren't normal blocks), torches, buttons, levers, redstone,
