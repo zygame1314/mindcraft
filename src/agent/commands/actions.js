@@ -150,7 +150,7 @@ export const actionsList = [
         description: 'Find and go to the nearest block of a given type in a given range.',
         params: {
             'type': { type: 'BlockName', description: 'The block type to go to.' },
-            'search_range': { type: 'float', description: 'The range to search for the block. Minimum 32.', domain: [10, 512] }
+            'search_range': { type: 'float', description: 'The range to search for the block. Minimum 32.', domain: [10, 512, '[]'] }
         },
         perform: runAsAction(async (agent, block_type, range) => {
             if (range < 32) {
@@ -190,6 +190,21 @@ export const actionsList = [
             const pos = agent.bot.entity.position;
             agent.memory_bank.rememberPlace(name, pos.x, pos.y, pos.z, note || '');
             return `已记住地点 "${name}" 于 (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)})${note ? `，备注：${note}` : ''}。`;
+        }
+    },
+    {
+        name: '!rememberPlace',
+        description: '把指定坐标存为命名地点，用于记录别人报的坐标或远处地点。例：!rememberPlace("大村",-1074,63,-480,"zygame1314发现的村庄")。已存在同名会更新。',
+        params: {
+            'name': { type: 'string', description: '地点名，例如 "大村"、"地狱门"。' },
+            'x': { type: 'float', description: 'X 坐标。', domain: [-Infinity, Infinity] },
+            'y': { type: 'float', description: 'Y 坐标。', domain: [-64, 320] },
+            'z': { type: 'float', description: 'Z 坐标。', domain: [-Infinity, Infinity] },
+            'note': { type: 'string', description: '可选备注，例如 "zygame1314发现的村庄"、"岩浆池"。', optional: true }
+        },
+        perform: async function (agent, name, x, y, z, note) {
+            agent.memory_bank.rememberPlace(name, x, y, z, note || '');
+            return `已记住地点 "${name}" 于 (${Math.round(x)}, ${Math.round(y)}, ${Math.round(z)})${note ? `，备注：${note}` : ''}。`;
         }
     },
     {

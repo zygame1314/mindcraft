@@ -2641,13 +2641,14 @@ export async function goToNearestBlock(bot, blockType, min_distance = 2, range =
         block = blocks[0];
     }
     else {
-        block = world.getNearestBlock(bot, blockType, range);
+        block = await world.getNearestBlockAsync(bot, blockType, range);
     }
     if (!block) {
         log(bot, `在 ${range} 格内没有找到任何 ${blockType}。`);
         return false;
     }
     // 统计附近同类型方块数量，让 bot 知道矿脉规模（否则只报"找到1个"导致挖矿给数量1）
+    // 用找到方块周围的小范围统计（32 格足够估算矿脉），不走大范围 findBlocks 避免再次卡死事件循环。
     let count = 1;
     try {
         const all = world.getNearestBlocksWhere(bot, b => {
@@ -2655,7 +2656,7 @@ export async function goToNearestBlock(bot, blockType, min_distance = 2, range =
             if (b.name === blockType) return true;
             if (!b.position) return false;
             return b.position.x === block.position.x && b.position.y === block.position.y && b.position.z === block.position.z;
-        }, range, 128);
+        }, 32, 128);
         count = all.length > 0 ? all.length : 1;
     } catch (_) {}
     log(bot, `在 ${block.position} 找到了 ${blockType}（附近约 ${count} 个），正在导航...`);

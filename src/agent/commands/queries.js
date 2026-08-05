@@ -126,29 +126,100 @@ export const queryList = [
     },
     {
         name: "!nearbyBlocks",
-        description: "Get the blocks near the bot.",
+        description: "Get the blocks near the bot, with relative coordinates and directions.",
         perform: function (agent) {
             let bot = agent.bot;
             let res = 'NEARBY_BLOCKS';
             let blocks = world.getNearestBlocks(bot);
-            let block_details = new Set();
-            
+
+            // 每个方块带相对坐标/距离/方位。保留语义修饰（水/熔岩 source/flowing）。
+            // 用 Set 去重会丢空间信息，改为按 (name, 相对坐标) 唯一，保留多块同种方块的不同位置。
+            const seen = new Set();
+            let lines = [];
             for (let block of blocks) {
-                let details = block.name;
+                if (!block || !block.position) continue;
+                const r = world.getRelativeDirection(bot, block.position);
+                const key = `${block.name}@${r.dx},${r.dy},${r.dz}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                let name = block.name;
                 if (block.name === 'water' || block.name === 'lava') {
-                    details += block.metadata === 0 ? ' (source)' : ' (flowing)';
+                    name += block.metadata === 0 ? '(source)' : '(flowing)';
                 }
-                block_details.add(details);
+                lines.push({ dist: r.dist, text: `${name} @(${r.dx >= 0 ? '+' : ''}${r.dx},${r.dy >= 0 ? '+' : ''}${r.dy},${r.dz >= 0 ? '+' : ''}${r.dz}) d=${r.dist.toFixed(1)} [${r.headingDir}/${r.worldDir}]` });
             }
-            for (let details of block_details) {
-                res += `\n- ${details}`;
-            }
-            if (block_details.size === 0) {
+            lines.sort((a, b) => a.dist - b.dist);
+            for (const l of lines.slice(0, 30)) res += `\n- ${l.text}`;
+
+            if (lines.length === 0) {
                 res += ': none';
-            } 
+            }
             else {
                 res += '\n- ' + world.getSurroundingBlocks(bot).join('\n- ');
                 res += `\n- First Solid Block Above Head: ${world.getFirstBlockAboveHead(bot, null, 32)}`;
+
+                // 空间格局概览：按世界六方位把附近方块聚合成"这一带是什么"。
+                // 目的：让 AI 知道"我前方是一大片水"而非只是"周围有水"。
+                // 每个 worldDir 统计该方向上出现最多/最近的主要方块类型 + 数量 + 最近距离。
+                const dirs = ['北', '南', '东', '西', '上', '下'];
+                const agg = {};
+                for (const d of dirs) agg[d] = {};
+                for (let block of blocks) {
+                    if (!block || !block.position) continue;
+                    const r = world.getRelativeDirection(bot, block.position);
+                    if (r.dist > 0.5) {
+                        const d = r.worldDir;
+                        const n = block.name;
+                        if (!agg[d][n]) agg[d][n] = { count: 0, minDist: r.dist };
+                        agg[d][n].count++;
+                        if (r.dist < agg[d][n].minDist) agg[d][n].minDist = r.dist;
+                    }
+                }
+                res += '\nSPACE_OVERVIEW (按世界方位聚合, 主导方块/数量/最近距离):';
+                let anyOverview = false;
+                for (const d of dirs) {
+                    const entries = Object.entries(agg[d]);
+                    if (entries.length === 0) continue;
+                    anyOverview = true;
+                    entries.sort((a, b) => b[1].count - a[1].count);
+                    const top = entries.slice(0, 3)
+                        .map(([n, v]) => `${n} x${v.count}(近${v.minDist.toFixed(1)})`)
+                        .join(', ');
+                    res += `\n- ${d}: ${top}`;
+                }
+                if (!anyOverview) res += ': 此处无方块';
+
+                // 室内围合检测：判断是否在火柴盒/洞穴/房间里，并给出每面墙/顶/底的坐标。
+                // 让 AI 能区分"我在一个5x5木板屋里"和"我在空旷平地"。
+                const enc = world.getEnclosure(bot, 24);
+                if (enc.enclosed || enc.confidence === '半围合') {
+                    const label = enc.enclosed ? '室内' : '半开放';
+                    res += `\nENCLOSURE (围合检测, ${label}/${enc.confidence}, 尺寸约${enc.sizeStr}):`;
+                    const fmtRel = (pos) => {
+                        const r = world.getRelativeDirection(bot, pos);
+                        return `@(${r.dx >= 0 ? '+' : ''}${r.dx},${r.dy >= 0 ? '+' : ''}${r.dy},${r.dz >= 0 ? '+' : ''}${r.dz}) d=${r.dist.toFixed(0)} [${r.headingDir}/${r.worldDir}] (x:${pos.x|0},y:${pos.y|0},z:${pos.z|0})`;
+                    };
+                    for (const wd of ['北', '南', '东', '西']) {
+                        const w = enc.walls[wd];
+                        if (w) res += `\n- ${wd}墙: ${w.name} ${fmtRel(w.pos)}`;
+                        else res += `\n- ${wd}: 无墙(开放/出口)`;
+                    }
+                    if (enc.ceiling) {
+                        // aboveHead=头顶净空格数：0=头顶直接封顶(2格高房)，1=头顶上方1格空气(3格高房)。
+                        // 用这个值描述天花板高度，比 d(相对脚) 更贴合玩家直觉。
+                        const ah = enc.ceiling.aboveHead;
+                        const desc = ah === 0 ? '头顶直接封顶(2格高房)' : `头顶上方${ah}格${ah === 1 ? '(3格高房)' : ''}`;
+                        res += `\n- 顶: ${enc.ceiling.name} ${desc}, 净空${ah}格 (天花板y:${enc.ceiling.pos.y | 0})`;
+                    } else {
+                        res += `\n- 顶: 无(露天)`;
+                    }
+                    if (enc.floor) {
+                        res += `\n- 地板: ${enc.floor.name} (脚下, y:${enc.floor.pos.y | 0})`;
+                    }
+                    if (enc.openings.length > 0) {
+                        res += `\n- 缺口/门方向: ${enc.openings.join('、')}`;
+                    }
+                }
             }
             return pad(res);
         }
@@ -170,19 +241,19 @@ export const queryList = [
     },
     {
         name: "!entities",
-        description: "Get the nearby players and entities.",
+        description: "Get the nearby players and entities, with relative coordinates and directions.",
         perform: function (agent) {
             let bot = agent.bot;
             let res = 'NEARBY_ENTITIES';
-            let players = world.getNearbyPlayerNames(bot);
-            let bots = convoManager.getInGameAgents().filter(b => b !== agent.name);
-            players = players.filter(p => !bots.includes(p));
+            const botBots = convoManager.getInGameAgents().filter(b => b !== agent.name);
+            const playerEntities = world.getNearbyPlayers(bot, 64);
 
-            for (const player of players) {
-                res += `\n- Human player: ${player}`;
-            }
-            for (const bot of bots) {
-                res += `\n- Bot player: ${bot}`;
+            // 玩家/Bot：带相对方位与距离，而非只列名字
+            for (const ent of playerEntities) {
+                if (!ent.username) continue;
+                const r = world.getRelativeDirection(bot, ent.position);
+                const tag = botBots.includes(ent.username) ? 'Bot player' : 'Human player';
+                res += `\n- ${tag}: ${ent.username} @(${r.dx >= 0 ? '+' : ''}${r.dx},${r.dy >= 0 ? '+' : ''}${r.dy},${r.dz >= 0 ? '+' : ''}${r.dz}) d=${r.dist.toFixed(1)} [${r.headingDir}/${r.worldDir}]`;
             }
 
             let nearbyEntities = world.getNearbyEntities(bot);
@@ -190,6 +261,8 @@ export const queryList = [
             let villagerIds = [];
             let babyVillagerIds = [];
             let villagerDetails = []; // Store detailed villager info including profession
+            // 每个实体记下相对方位，最后按距离输出，让 AI 知道"怪在我前方5格贴脸"
+            let entityLocs = [];
             
             for (const entity of nearbyEntities) {
                 if (entity.type === 'player' || entity.name === 'item')
@@ -199,6 +272,17 @@ export const queryList = [
                     entityCounts[entity.name] = 0;
                 }
                 entityCounts[entity.name]++;
+                
+                // 记录方位（用于按距离列出威胁来源方向）
+                try {
+                    const r = world.getRelativeDirection(bot, entity.position);
+                    const hostile = mc.isHostile(entity);
+                    entityLocs.push({
+                        name: entity.name,
+                        dist: r.dist,
+                        text: `${entity.name} @(${r.dx >= 0 ? '+' : ''}${r.dx},${r.dy >= 0 ? '+' : ''}${r.dy},${r.dz >= 0 ? '+' : ''}${r.dz}) d=${r.dist.toFixed(1)} [${r.headingDir}/${r.worldDir}]${hostile ? ' <敌对>' : ''}`
+                    });
+                } catch (_) { }
                 
                 if (entity.name === 'villager') {
                     if (entity.metadata && entity.metadata[16] === 1) {
@@ -229,10 +313,70 @@ export const queryList = [
                     res += `\n- entities: ${count} ${entityType}(s)`;
                 }
             }
+
+            // 按距离列出每个实体的方位（最近的在前），敌对实体优先感知
+            entityLocs.sort((a, b) => {
+                if ((a.text.includes('<敌对>') ? 1 : 0) !== (b.text.includes('<敌对>') ? 1 : 0))
+                    return (b.text.includes('<敌对>') ? 1 : 0) - (a.text.includes('<敌对>') ? 1 : 0);
+                return a.dist - b.dist;
+            });
+            if (entityLocs.length > 0) {
+                res += '\nENTITY_DIRECTIONS (按威胁/距离排序):';
+                for (const l of entityLocs.slice(0, 20)) res += `\n- ${l.text}`;
+            }
             
             if (res == 'NEARBY_ENTITIES') {
                 res += ': none';
             }
+            return pad(res);
+        }
+    },
+    {
+        name: '!scanDirection',
+        description: '沿给定世界方向逐格射线扫描远处/高处的方块序列。用于探测超出 nearbyBlocks 8格半径的目标，如远处高塔/石柱、长墙、悬崖边缘，也含水/岩浆等液体段。方向用 north/south/east/west/up/down 或中文 北/南/东/西/上/下。返回该方向遇到的方块(含液体)及连续段(可看出柱子高度、墙长度、岩浆池深度)。',
+        params: {
+            'direction': { type: 'string', description: '世界方位: north/south/east/west/up/down 或 北/南/东/西/上/下' },
+            'distance': { type: 'int', description: '最大扫描距离(格), 默认64, 建议32-128', domain: [1, 512] }
+        },
+        perform: function (agent, direction, distance) {
+            let bot = agent.bot;
+            if (!direction) return pad('SCAN: 缺少 direction 参数(可用 north/south/east/west/up/down)。');
+            const maxDist = (distance && distance > 0) ? Math.min(distance, 512) : 64;
+            const scan = world.scanDirection(bot, direction, maxDist);
+            if (scan.error) return pad('SCAN: ' + scan.error);
+            let res = `SCAN (${direction}, ${maxDist}格)`;
+            if (scan.hits.length === 0) {
+                res += ': 该方向 ' + maxDist + ' 格内无实体方块';
+                return pad(res);
+            }
+            const fmtRel = (pos) => {
+                const r = world.getRelativeDirection(bot, pos);
+                return `@(${r.dx >= 0 ? '+' : ''}${r.dx},${r.dy >= 0 ? '+' : ''}${r.dy},${r.dz >= 0 ? '+' : ''}${r.dz}) (x:${pos.x | 0},y:${pos.y | 0},z:${pos.z | 0})`;
+            };
+            // 连续段：水平扫描补纵向高度(柱子多高)，垂直扫描给垂直延伸。AI 一眼看高度。
+            if (scan.segments.length > 0) {
+                res += '\nSEGMENTS (连续实体段, 材质/尺寸/起止):';
+                for (const s of scan.segments.slice(0, 8)) {
+                    let spanDesc;
+                    if (s.axis === 'y') {
+                        spanDesc = `高${s.len}格`;
+                    } else {
+                        spanDesc = `${s.axis === 'x' ? '宽' : '长'}${s.len}格`;
+                        // 水平扫描时补"该柱/墙的纵向高度"，这是石柱等竖直结构的关键信息
+                        if (s.height) {
+                            const vs = s.verticalSpan;
+                            spanDesc += `, 纵高${s.height}格(y:${vs.botY | 0}→${vs.topY | 0})`;
+                        }
+                    }
+                    res += `\n- ${s.liquid ? '[液体]' : ''}${s.name} ${spanDesc}: ${fmtRel(s.startPos)}→${fmtRel(s.endPos)}`;
+                }
+            }
+            // 前 N 个命中点（细节备份，确认段内具体方块）
+            res += '\nHITS (依次命中, 前15个):';
+            for (const h of scan.hits.slice(0, 15)) {
+                res += `\n- ${h.liquid ? '[液体]' : ''}${h.name} d=${h.dist} ${fmtRel(h.pos)}`;
+            }
+            if (scan.hits.length > 15) res += `\n... 共${scan.hits.length}个命中`;
             return pad(res);
         }
     },

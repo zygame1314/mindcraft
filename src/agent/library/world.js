@@ -115,6 +115,248 @@ export function getFirstBlockAboveHead(bot, ignore_types=null, distance=32) {
 }
 
 
+export function getRelativeDirection(bot, targetPos) {
+    /**
+     * 把目标位置相对 bot 解析成「相对坐标 + 世界方位 + 朝向方位」。
+     * 世界方位按 MC 约定：+Z 南 / -Z 北 / +X 东 / -X 西 / +Y 上 / -Y 下。
+     * 朝向方位依 bot.entity.yaw 计算（yaw=0 朝 +Z/南）：
+     *   前=(-sin yaw, cos yaw)，右=(-cos yaw, -sin yaw)，再按主导轴归类。
+     * @param {Bot} bot
+     * @param {Vec3} targetPos
+     * @returns {{dx:number, dy:number, dz:number, dist:number, worldDir:string, headingDir:string}}
+     * @example
+     * let r = world.getRelativeDirection(bot, block.position); // r.headingDir === '前'
+     **/
+    const bp = bot.entity.position;
+    const dx = targetPos.x - bp.x;
+    const dy = targetPos.y - bp.y;
+    const dz = targetPos.z - bp.z;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const ax = Math.abs(dx), ay = Math.abs(dy), az = Math.abs(dz);
+
+    let worldDir = '此处';
+    let headingDir = '此处';
+    if (dist > 0.5) {
+        // 世界方位：取绝对值最大的轴
+        if (ay >= ax && ay >= az) worldDir = dy > 0 ? '上' : '下';
+        else if (az >= ax) worldDir = dz > 0 ? '南' : '北';
+        else worldDir = dx > 0 ? '东' : '西';
+
+        // 朝向方位：垂直方向主导时直接判上/下，否则投影到 bot 的前/后/左/右
+        if (ay > ax && ay > az) {
+            headingDir = dy > 0 ? '上' : '下';
+        } else {
+            const yaw = bot.entity.yaw || 0;
+            const fx = -Math.sin(yaw), fz = Math.cos(yaw);   // 前向
+            const rx = -Math.cos(yaw), rz = -Math.sin(yaw); // 右向
+            const fComp = dx * fx + dz * fz;
+            const rComp = dx * rx + dz * rz;
+            if (Math.abs(fComp) >= Math.abs(rComp)) headingDir = fComp > 0 ? '前' : '后';
+            else headingDir = rComp > 0 ? '右' : '左';
+        }
+    }
+    return { dx: Math.round(dx), dy: Math.round(dy), dz: Math.round(dz), dist, worldDir, headingDir };
+}
+
+
+// 判断 bot 是否处于"室内"。沿四个水平方向各逐格射线扫描，找第一块非空气方块
+// 作为该方向的墙/边界，记录其位置/距离/方块；同时扫头顶第一块实体方块（顶/天花板）
+// 和脚下方块（地板）。据此推断围合情况、估算房间大小、找门/缺口。
+//
+// 判定"墙"的标准：非 air/cave_air/水/熔岩/草/雪/叶 等可穿透/非实体方块。
+// 这与玩家直觉一致——火柴盒的木板墙、石砖墙都算墙；露天田野的草不算墙，
+// 这样露天时四向大概率扫不到墙（超出扫描上限仍是空气），不会误判成室内。
+function _isWallLike(block) {
+    if (!block) return false;
+    const n = block.name;
+    if (n === 'air' || n === 'cave_air') return false;
+    if (n === 'water' || n === 'lava') return false;
+    if (n === 'short_grass' || n === 'tall_grass' || n === 'fern') return false;
+    if (n.endsWith('leaves')) return false;
+    if (n === 'snow' || n === 'snow_block') return false;
+    if (n.endsWith('vine') || n.endsWith('moss')) return false;
+    return true;
+}
+
+function _isLiquid(block) {
+    if (!block) return false;
+    const n = block.name;
+    return n === 'water' || n === 'lava' || n === 'flowing_water' || n === 'flowing_lava';
+}
+
+export function getEnclosure(bot, maxDist = 24) {
+    /**
+     * 判断 bot 是否处于"室内"（火柴盒/洞穴/房间），并返回四面墙、顶、底的位置与距离。
+     * @param {Bot} bot
+     * @param {number} maxDist - 每个方向最大扫描距离，默认 24。
+     * @returns {{ enclosed:boolean, confidence:string, size:string, walls:Object, ceiling:Object|null, floor:Object, openings:Array }}
+     *   walls 形如 { 北:{name, pos, rel, dist}, 南:..., 东:..., 西:... }
+     *   openings: 缺墙的方向（出口/门候选）列表
+     * @example
+     * let e = world.getEnclosure(bot); // e.enclosed===true 表示在室内
+     **/
+    const bp = bot.entity.position;
+    const feetY = Math.floor(bp.y);
+    // 水平扫描在 bot 腿部高度(y=0)进行；头顶在 y=2 起向上扫；地板扫脚下方块
+    const wallDirs = [
+        { dir: '北', dx: 0, dz: -1 },
+        { dir: '南', dx: 0, dz: 1 },
+        { dir: '东', dx: 1, dz: 0 },
+        { dir: '西', dx: -1, dz: 0 },
+    ];
+
+    const walls = {};
+    let wallCount = 0;
+    for (const d of wallDirs) {
+        let found = null;
+        for (let i = 1; i <= maxDist; i++) {
+            const block = bot.blockAt(bp.offset(d.dx * i, 0, d.dz * i));
+            if (_isWallLike(block)) {
+                found = { name: block.name, pos: block.position, dist: i, r: null };
+                break;
+            }
+        }
+        walls[d.dir] = found;
+        if (found) wallCount++;
+    }
+
+    // 顶：从头顶上方逐格向上找第一块实体方块
+    let ceiling = null;
+    for (let i = 2; i <= maxDist; i++) {
+        const block = bot.blockAt(bp.offset(0, i, 0));
+        if (_isWallLike(block)) {
+            // dist=相对脚的距离；aboveHead=相对头顶的净空格数（i-2）。
+            // 2格高房→aboveHead=0(头顶直接封顶)；3格高→1(头顶上方1格空气再封顶)。
+            ceiling = { name: block.name, pos: block.position, dist: i, aboveHead: i - 2 };
+            break;
+        }
+    }
+
+    // 底：脚下方块（地板/地面）
+    const floorBlock = bot.blockAt(bp.offset(0, -1, 0));
+    const floor = floorBlock ? { name: floorBlock.name, pos: floorBlock.position, dist: 1 } : null;
+
+    // 围合判定：至少 3 面墙 + 有顶 才算"室内"；4 面墙且墙都较近则高置信
+    const openings = [];
+    for (const d of wallDirs) {
+        if (!walls[d.dir]) openings.push(d.dir);
+    }
+
+    let enclosed = false;
+    let confidence = '无';
+    if (wallCount >= 3 && ceiling) {
+        enclosed = true;
+        // 4 面墙 + 有顶 + 最近墙 <=8 → 高置信(完整火柴盒)；3 面(有门) → 中
+        const minWallDist = Math.min(...wallDirs.map(d => walls[d.dir] ? walls[d.dir].dist : 99));
+        if (wallCount === 4 && minWallDist <= 8) confidence = '高';
+        else confidence = '中';
+    } else if (wallCount >= 2 && ceiling) {
+        // 墙不全（L 形/半开放），算"半围合"，不标室内但提示
+        enclosed = false;
+        confidence = '半围合';
+    }
+
+    // 估算尺寸：有缺墙方向时用另一侧距离近似，仍能给个跨度
+    // 南北跨度 = 南墙dist + 北墙dist + 1（缺一侧时用另一侧代）
+    const ns = walls['南'] ? walls['南'].dist : (walls['北'] ? walls['北'].dist : 0);
+    const nn = walls['北'] ? walls['北'].dist : (walls['南'] ? walls['南'].dist : 0);
+    const ne = walls['东'] ? walls['东'].dist : (walls['西'] ? walls['西'].dist : 0);
+    const nw = walls['西'] ? walls['西'].dist : (walls['东'] ? walls['东'].dist : 0);
+    let sizeStr = '未知';
+    if (wallCount >= 2) {
+        const xSpan = ne + nw + 1;
+        const zSpan = ns + nn + 1;
+        const ySpan = ceiling ? ceiling.dist + 1 : '?';
+        sizeStr = `${xSpan}x${zSpan}x${ySpan}`;
+    }
+
+    return { enclosed, confidence, sizeStr, walls, ceiling, floor, openings };
+}
+
+
+export function scanDirection(bot, direction, maxDist = 64) {
+    /**
+     * 沿给定世界方向逐格射线扫描，返回依次遇到的方块序列。
+     * 用于探测远处/高处的目标，弥补 !nearbyBlocks 8格半径的盲区，
+     * 例如查"东边那根石柱多高"——选 direction='east' 能看到柱根到柱顶整列方块。
+     * 空气/草/叶/雪等非实体方块被跳过，水/岩浆等液体单独记为[液体]段。
+     * @param {Bot} bot
+     * @param {string} direction - 世界方位：north/south/east/west/up/down（中文北南东西上下也可）。
+     * @param {number} maxDist - 最大扫描距离，默认 64。
+     * @returns {{ hits:Array, segments:Array }}
+     *   hits: 依次遇到的非空方块 [{name, pos, dist}]
+     *   segments: 连续实体的段 [{name, startY/endY 或 startX/Z, len, startPos, endPos}]（可推断柱子高度/墙长度）
+     * @example
+     * let s = world.scanDirection(bot, 'east', 64); // s.segments[0].len 就是东边石柱高度
+     **/
+    const dirMap = {
+        'north': [0, 0, -1], '北': [0, 0, -1],
+        'south': [0, 0, 1], '南': [0, 0, 1],
+        'east': [1, 0, 0], '东': [1, 0, 0],
+        'west': [-1, 0, 0], '西': [-1, 0, 0],
+        'up': [0, 1, 0], '上': [0, 1, 0],
+        'down': [0, -1, 0], '下': [0, -1, 0],
+    };
+    const d = dirMap[direction];
+    if (!d) return { error: `未知方向 '${direction}'，可用: north/south/east/west/up/down 或 北/南/东/西/上/下` };
+    const bp = bot.entity.position;
+    const hits = [];
+    let segments = [];
+    let cur = null; // 当前连续段 {name, startPos, endPos, len, axis, height?}
+    const isHorizontal = d[0] !== 0 || d[2] !== 0;
+    const axis = (d[0] !== 0) ? 'x' : (d[2] !== 0) ? 'z' : 'y';
+
+    // 测一个方块在 y 方向上连续同材质的延伸高度（向上+向下），用于水平扫描时补"柱子多高"。
+    const measureVertical = (pos, name) => {
+        let topY = pos.y, botY = pos.y;
+        for (let y = pos.y + 1; y < pos.y + maxDist; y++) {
+            const b = bot.blockAt(pos.offset ? pos.offset(0, y - pos.y, 0) : null);
+            if (!b || b.name !== name) break;
+            topY = y;
+        }
+        for (let y = pos.y - 1; y > pos.y - maxDist; y--) {
+            const b = bot.blockAt(pos.offset ? pos.offset(0, y - pos.y, 0) : null);
+            if (!b || b.name !== name) break;
+            botY = y;
+        }
+        return { height: topY - botY + 1, topY, botY };
+    };
+
+    for (let i = 1; i <= maxDist; i++) {
+        const block = bot.blockAt(bp.offset(d[0] * i, d[1] * i, d[2] * i));
+        const name = block ? block.name : 'air';
+        const wallLike = _isWallLike(block);
+        const liquid = _isLiquid(block);
+        if (wallLike || liquid) {
+            hits.push({ name, pos: block.position, dist: i, liquid });
+            // 连续段：同材质相邻 → 续段；否则结束旧段开新段
+            if (cur && cur.name === name) {
+                cur.endPos = block.position;
+                cur.len++;
+            } else {
+                if (cur) segments.push(cur);
+                cur = { name, startPos: block.position, endPos: block.position, len: 1, axis, liquid };
+            }
+        } else {
+            if (cur) { segments.push(cur); cur = null; }
+        }
+    }
+    if (cur) segments.push(cur);
+
+    // 水平扫描：给每个段补"纵向高度"，让 AI 一眼看出"东边石柱高36格"而非只"宽1格"。
+    if (isHorizontal) {
+        for (const s of segments) {
+            try {
+                const v = measureVertical(s.startPos, s.name);
+                s.height = v.height;
+                s.verticalSpan = { topY: v.topY, botY: v.botY };
+            } catch (_) { s.height = null; }
+        }
+    }
+    return { hits, segments };
+}
+
+
 export function getNearestBlocks(bot, block_types=null, distance=8, count=10000) {
     /**
      * Get a list of the nearest blocks of the given types.
@@ -162,7 +404,7 @@ export function getNearestBlock(bot, block_type, distance=16) {
      /**
      * Get the nearest block of the given type.
      * @param {Bot} bot - The bot to get the nearest block for.
-     * @param {string} block_type - The name of the block to search for.
+     * @param {string} block_type - The name of the block to search.
      * @param {number} distance - The maximum distance to search, default 16.
      * @returns {Block} - The nearest block of the given type.
      * @example
@@ -173,6 +415,37 @@ export function getNearestBlock(bot, block_type, distance=16) {
         return blocks[0];
     }
     return null;
+}
+
+const _yield = () => new Promise(resolve => setImmediate(resolve));
+
+export async function getNearestBlockAsync(bot, block_type, distance=16) {
+    /**
+     * Async, non-blocking version of getNearestBlock.
+     * Searches outward in expanding shells so the event loop can breathe
+     * between batches (keeps socket.io heartbeats alive → no disconnect).
+     * Use this instead of getNearestBlock for large search radii.
+     * @param {Bot} bot - The bot to get the nearest block for.
+     * @param {string} block_type - The name of the block to search.
+     * @param {number} distance - The maximum distance to search, default 16.
+     * @returns {Promise<Block|null>} - The nearest block of the given type, or null.
+     **/
+    // 小范围直接走同步路径，开销可忽略
+    if (distance <= 64) {
+        return getNearestBlock(bot, block_type, distance);
+    }
+    // 向外逐圈扩大：先扫近的，近的没有再放大。每圈之间 yield，让心跳通过。
+    // 步长 64：64→128→192→...→distance。最内圈用同步也行，但统一异步更简单。
+    const step = 64;
+    let r = step;
+    while (r < distance) {
+        const block = getNearestBlock(bot, block_type, r);
+        if (block) return block;
+        await _yield();
+        r += step;
+    }
+    // 最后一圈到完整 distance
+    return getNearestBlock(bot, block_type, distance);
 }
 
 
