@@ -1,6 +1,230 @@
 import * as skills from '../library/skills.js';
 import settings from '../settings.js';
 import convoManager from '../conversation.js';
+import { readdirSync, readFileSync } from 'fs';
+import * as mc from '../../utils/mcdata.js';
+import * as world from '../library/world.js';
+
+// 预设建筑模板生成器：AI 给一个 type 关键词，代码层产出标准 blueprint
+// ({levels:[{coordinates:[x,y,z], placement:[[...]]}]})，再交给 buildStructure 搭。
+// 这样 AI 不必编码也不必逐块 placeBlock，从命令层就把"搭建筑"封进确定逻辑。
+// placement 用 [z][x] 二维数组，元素为方块名；null/'' 跳过，'air' 表示清除已有块。
+function makePresetBlueprint(type, block, width, height, ox, oy, oz) {
+    const B = block || 'oak_planks';
+    const W = Math.max(1, Math.min(32, width || 5));
+    const H = Math.max(1, Math.min(32, height || 3));
+    // 坐标向下取整，与 placeBlock 内部 Math.floor 一致；bot 站在脚下方块上方
+    const sx = Math.floor(ox), sy = Math.floor(oy), sz = Math.floor(oz);
+    const mk = (rows) => ({ coordinates: [sx, sy, sz], placement: rows });
+    if (type === 'floor') {
+        const rows = [];
+        for (let z = 0; z < W; z++) {
+            const row = [];
+            for (let x = 0; x < W; x++) row.push(B);
+            rows.push(row);
+        }
+        return { levels: [mk(rows)] };
+    }
+    if (type === 'wall') {
+        const rows = [];
+        for (let z = 0; z < 1; z++) {
+            const row = [];
+            for (let x = 0; x < W; x++) row.push(B);
+            rows.push(row);
+        }
+        const levels = [];
+        for (let y = 0; y < H; y++) {
+            levels.push({ coordinates: [sx, sy + y, sz], placement: rows.map(r => r.slice()) });
+        }
+        return { levels };
+    }
+    if (type === 'pillar') {
+        // 单格柱塔，便于承重排序验证；高度 H
+        const rows = [[B]];
+        const levels = [];
+        for (let y = 0; y < H; y++) {
+            levels.push({ coordinates: [sx, sy + y, sz], placement: rows.map(r => r.slice()) });
+        }
+        return { levels };
+    }
+    if (type === 'house') {
+        // 5x5 平面、4 墙高的小屋：地基+封顶实心，墙只围外框，内部 3x3 真空间。
+        // 正南（z=4）中央开 2 格高门洞，左右墙上各留 1 格窗户（玻璃），可进光照。
+        const SIZE = 5;
+        const wallH = 4;
+        const plane = (fill) => {
+            const rows = [];
+            for (let z = 0; z < SIZE; z++) {
+                const row = [];
+                for (let x = 0; x < SIZE; x++) {
+                    const edge = x === 0 || x === SIZE - 1 || z === 0 || z === SIZE - 1;
+                    row.push(edge ? B : fill);
+                }
+                rows.push(row);
+            }
+            return rows;
+        };
+        const glass = 'glass';
+        const levels = [];
+        for (let y = 0; y < wallH + 2; y++) {
+            let rows;
+            if (y === 0) {
+                rows = plane(B);                          // 地基实心
+            } else if (y === wallH + 1) {
+                rows = plane(B);                          // 封顶实心
+            } else {
+                rows = plane('air');                      // 墙体外框+内部空
+                // 正南 z=4 行中央开 2 格高门洞（y=1,2），y=3 在门顶填 B 作门楣
+                if (y === 1 || y === 2) rows[SIZE - 1][2] = 'air';
+                // 窗户：东墙(x=4) 和西墙(x=0) 各留一格玻璃，放在墙高中部 y=2
+                if (y === 2) {
+                    rows[2][0] = glass;                   // 西窗
+                    rows[2][SIZE - 1] = glass;            // 东窗
+                    // 北墙(z=0)中央也留一窗，透气+采光
+                    rows[0][2] = glass;
+                }
+            }
+            levels.push({ coordinates: [sx, sy + y, sz], placement: rows });
+        }
+        return { levels };
+    }
+    return null;
+}
+
+// --- 社区蓝图接入 ---
+// src/agent/npc/construction/*.json 的格式：
+//   { name, offset, blocks:[y][z][x] }
+//   blocks 的 y 是"含地下偏移"的全局层序：blocks[offset] 才是地面第一层。
+//   offset 通常为 -1（表示地面下一格是地基），blocks 长度 = offset + 实际层数。
+//   generic 名：'planks'/'log'/'door'/'bed'/'torch' 等不带木种/颜色前缀，
+//   需要在放置时按背包存量解析成具体方块（getTypeOfGeneric）。
+// buildStructure 需要的格式：
+//   { levels:[{ coordinates:[x,y,z], placement:[z][x] }] }
+// 转换规则：
+//   - 每个全局 y 层 -> 一个 level，坐标 = 起点 + y（offset 已含在 blocks 索引里）。
+//   - generic 名在转换期无法解析（要读背包/附近方块），保留原样交给 placeBlock；
+//     placeBlock 内部 cheat 路径对 'door'/'bed' 有多格处理，对 'planks'/'log'
+//     会因 findInventoryItem('planks') 失败而放不下。故这里先做一次"尽力解析"：
+//     若背包里有该 generic 的任意木种实例，挑背包里最多的那种替换；查不到就
+//     原样传下去，让 placeBlock 自己报"没有 planks"（AI 据此去伐木）。
+//   - 'air' 保留，buildStructure 会调 breakBlockAt 清掉。
+//   - '' 空串/null 跳过（不写进 levels，省一格空操作）。
+function resolveGenericBlockName(bot, name) {
+    if (!name) return name;
+    if (mc.MATCHING_WOOD_BLOCKS.includes(name)) {
+        const inv = world.getInventoryCounts(bot);
+        let best = null, bestCount = 0;
+        for (const item in inv) {
+            for (const wood of mc.WOOD_TYPES) {
+                if (item === wood + '_' + name || (name === 'log' && item === wood + '_log')) {
+                    if (inv[item] > bestCount) { bestCount = inv[item]; best = item; }
+                }
+            }
+        }
+        if (best) return best;
+        return 'oak_' + name;
+    }
+    if (name === 'bed') {
+        const inv = world.getInventoryCounts(bot);
+        for (const color of mc.WOOL_COLORS) {
+            if (inv[color + '_bed'] > 0) return color + '_bed';
+        }
+        return 'red_bed';
+    }
+    return name;
+}
+
+function communityBlueprintToLevels(bot, bp, sx, sy, sz) {
+    const offset = bp.offset || 0;
+    const blocks = bp.blocks;
+    const sizey = blocks.length;
+    const levels = [];
+    for (let y = 0; y < sizey; y++) {
+        const worldY = sy + y;            // offset 已含在 blocks 索引里：blocks[0] 是 offset 层
+        const layer = blocks[y] || [];
+        const placement = [];
+        for (let z = 0; z < layer.length; z++) {
+            const row = layer[z] || [];
+            const out = [];
+            for (let x = 0; x < row.length; x++) {
+                let name = row[x];
+                if (name === null || name === undefined || name === '') { out.push(null); continue; }
+                if (name === 'air') { out.push('air'); continue; }
+                out.push(resolveGenericBlockName(bot, name));
+            }
+            placement.push(out);
+        }
+        levels.push({ coordinates: [sx, worldY, sz], placement });
+    }
+    return { levels };
+}
+
+// 懒加载社区蓝图目录缓存（避免每次 !buildStructure 都读盘）。
+let _communityBlueprintsCache = null;
+function loadCommunityBlueprints() {
+    if (_communityBlueprintsCache) return _communityBlueprintsCache;
+    const dir = 'src/agent/npc/construction';
+    const map = {};
+    try {
+        for (const file of readdirSync(dir)) {
+            if (!file.endsWith('.json')) continue;
+            const name = file.slice(0, -5);
+            map[name] = JSON.parse(readFileSync(dir + '/' + file, 'utf8'));
+        }
+    } catch (e) {
+        console.log('读取社区蓝图目录失败：', e?.message || e);
+    }
+    _communityBlueprintsCache = map;
+    return map;
+}
+
+// 方块名（去状态后）-> 实际物品名的映射。多数方块名==物品名，少数例外：
+// iron_chain 方块在物品表里叫 chain；grass_block 在物品表也叫 grass_block（有物品）。
+// 这里只列例外；其余靠 itemsByName 查不到时再回退到 blocksByName 同名。
+const BLOCK_TO_ITEM_NAME = {
+    'iron_chain': 'chain',
+    // lit=false/true 的红石灯方块用同一物品 redstone_lamp；剥状态后已是 redstone_lamp。
+    // 双高层半砖（type=double）实际由两块普通半砖合成，单独标记下面处理。
+};
+
+// 把蓝图方块名（可能带 [状态]）转成生存放置所需的物品名。
+// 返回 null 表示该方块不需要物品（air/空）或无法映射。
+function blockNameToItemName(blockName) {
+    if (!blockName || blockName === 'air') return null;
+    // 剥掉状态串：grass_block[snowy=false] -> grass_block
+    const base = blockName.replace(/\[.*$/, '');
+    if (base === 'air' || base === '') return null;
+    // double 半砖（如 deepslate_brick_slab[type=double]）放下去算 1 块，
+    // 但生存合成/采集时按 1 个普通半砖算（放置两块叠成 double，游戏内部如此）。
+    // 为简化材料统计，double 当 1 个同名半砖物品计。
+    // 这里直接返回 base，状态已剥掉，base 就是 deepslate_brick_slab。
+    return BLOCK_TO_ITEM_NAME[base] || base;
+}
+
+// 统计蓝图所需材料（物品名->数量），air/空不计。
+function blueprintMaterialCounts(bp) {
+    const counts = {};
+    if (!bp || !Array.isArray(bp.blocks)) return counts;
+    for (const layer of bp.blocks) {
+        for (const row of layer) {
+            for (const cell of row) {
+                const item = blockNameToItemName(cell);
+                if (item) counts[item] = (counts[item] || 0) + 1;
+            }
+        }
+    }
+    return counts;
+}
+
+// 查找蓝图名（支持模糊匹配，与 !buildStructure 一致）。
+function findCommunityBlueprint(wanted) {
+    const community = loadCommunityBlueprints();
+    const norm = s => (s || '').toLowerCase().replace(/[\s_-]+/g, '');
+    for (const name in community) {
+        if (name === wanted || norm(name) === norm(wanted)) return { bp: community[name], name };
+    }
+    return null;
+}
 
 // 把 chest 参数（箱子别名或 x 坐标）解析成 skills 期望的 x/y/z。
 // - chest 为空：返回全 null，skills 用最近箱子。
@@ -25,9 +249,9 @@ function resolveChestArg(agent, chest, chest_y, chest_z) {
 }
 
 
-function runAsAction (actionFn, resume = false, timeout = -1) {
+function runAsAction(actionFn, resume = false, timeout = -1) {
     let actionLabel = null;  // Will be set on first use
-    
+
     const wrappedAction = async function (agent, ...args) {
         // Set actionLabel only once, when the action is first created
         if (!actionLabel) {
@@ -50,13 +274,13 @@ function runAsAction (actionFn, resume = false, timeout = -1) {
 export const actionsList = [
     {
         name: '!newAction',
-        description: 'Write and run custom JavaScript code for tasks the built-in commands cannot do directly. Prefer this whenever a task needs MULTIPLE steps, loops, conditions, combining several commands, or tracking state across actions. Examples: "collect 20 wood then craft them into planks", "fish until inventory is full", "mine downward until hitting lava", "smelt all raw_iron in inventory". A single simple action (just go somewhere / collect one thing / craft once) should still use the dedicated command instead. Inside the code you call skills/world functions directly (e.g. skills.collectBlock(bot, "oak_log", 5)) and use log(bot, msg) to report progress; the prompt you pass should be a detailed step-by-step plan.', 
+        description: '编写并运行自定义 JS 代码以完成复杂任务（如多步操作、循环、状态跟踪）。单步简单任务请使用专用命令。代码中可直接调用 skills/world 函数，并使用 log(bot, msg) 报告进度。',
         params: {
-            'prompt': { type: 'string', description: 'A natural language prompt to guide code generation. Make a detailed step-by-step plan.' }
+            'prompt': { type: 'string', description: '引导代码生成的详细分步计划。' }
         },
-        perform: async function(agent, prompt) {
+        perform: async function (agent, prompt) {
             // just ignore prompt - it is now in context in chat history
-            if (!settings.allow_insecure_coding) { 
+            if (!settings.allow_insecure_coding) {
                 agent.openChat('newAction 已禁用。请在 settings.js 中设置 allow_insecure_coding=true 来启用。');
                 return "newAction 不允许！代码编写功能已在设置中禁用。请通知用户。";
             }
@@ -68,13 +292,13 @@ export const actionsList = [
                     result = 'Error generating code: ' + e.toString();
                 }
             };
-            await agent.actions.runAction('action:newAction', actionFn, {timeout: settings.code_timeout_mins});
+            await agent.actions.runAction('action:newAction', actionFn, { timeout: settings.code_timeout_mins });
             return result;
         }
     },
     {
         name: '!stop',
-        description: 'Force stop all actions and commands that are currently executing.',
+        description: '强制停止当前正在执行的所有动作和命令。',
         perform: async function (agent) {
             await agent.actions.stop();
             agent.clearBotLogs();
@@ -88,7 +312,7 @@ export const actionsList = [
     },
     {
         name: '!stfu',
-        description: 'Stop all chatting and self prompting, but continue current action.',
+        description: '停止所有聊天和自我提示，但继续执行当前动作。',
         perform: async function (agent) {
             agent.openChat('闭嘴了。');
             agent.shutUp();
@@ -97,14 +321,14 @@ export const actionsList = [
     },
     {
         name: '!restart',
-        description: 'Restart the agent process.',
+        description: '重启 Agent 进程。',
         perform: async function (agent) {
             agent.cleanKill();
         }
     },
     {
         name: '!clearChat',
-        description: 'Clear the chat history.',
+        description: '清除聊天记录。',
         perform: async function (agent) {
             agent.history.clear();
             return agent.name + "'s chat history was cleared, starting new conversation from scratch.";
@@ -112,10 +336,10 @@ export const actionsList = [
     },
     {
         name: '!goToPlayer',
-        description: 'Go to the given player.',
+        description: '前往指定玩家的位置。',
         params: {
-            'player_name': {type: 'string', description: 'The name of the player to go to.'},
-            'closeness': {type: 'float', description: 'How close to get to the player.', domain: [0, Infinity]}
+            'player_name': { type: 'string', description: '要前往的玩家名称。' },
+            'closeness': { type: 'float', description: '与玩家保持的距离。', domain: [0, Infinity] }
         },
         perform: runAsAction(async (agent, player_name, closeness) => {
             await skills.goToPlayer(agent.bot, player_name, closeness);
@@ -123,10 +347,10 @@ export const actionsList = [
     },
     {
         name: '!followPlayer',
-        description: 'Endlessly follow the given player.',
+        description: '持续跟随指定玩家。',
         params: {
-            'player_name': {type: 'string', description: 'name of the player to follow.'},
-            'follow_dist': {type: 'float', description: 'The distance to follow from.', domain: [0, Infinity]}
+            'player_name': { type: 'string', description: '要跟随的玩家名称。' },
+            'follow_dist': { type: 'float', description: '跟随距离。', domain: [0, Infinity] }
         },
         perform: runAsAction(async (agent, player_name, follow_dist) => {
             await skills.followPlayer(agent.bot, player_name, follow_dist);
@@ -134,12 +358,12 @@ export const actionsList = [
     },
     {
         name: '!goToCoordinates',
-        description: 'Go to the given x, y, z location.',
+        description: '前往指定的 x, y, z 坐标。',
         params: {
-            'x': {type: 'float', description: 'The x coordinate.', domain: [-Infinity, Infinity]},
-            'y': {type: 'float', description: 'The y coordinate.', domain: [-64, 320]},
-            'z': {type: 'float', description: 'The z coordinate.', domain: [-Infinity, Infinity]},
-            'closeness': {type: 'float', description: 'How close to get to the location.', domain: [0, Infinity]}
+            'x': { type: 'float', description: 'X 坐标。', domain: [-Infinity, Infinity] },
+            'y': { type: 'float', description: 'Y 坐标。', domain: [-64, 320] },
+            'z': { type: 'float', description: 'Z 坐标。', domain: [-Infinity, Infinity] },
+            'closeness': { type: 'float', description: '与目标位置保持的距离。', domain: [0, Infinity] }
         },
         perform: runAsAction(async (agent, x, y, z, closeness) => {
             await skills.goToPosition(agent.bot, x, y, z, closeness);
@@ -147,10 +371,10 @@ export const actionsList = [
     },
     {
         name: '!searchForBlock',
-        description: 'Find and go to the nearest block of a given type in a given range.',
+        description: '在指定范围内寻找并前往最近的指定类型方块。',
         params: {
-            'type': { type: 'BlockName', description: 'The block type to go to.' },
-            'search_range': { type: 'float', description: 'The range to search for the block. Minimum 32.', domain: [10, 512, '[]'] }
+            'type': { type: 'BlockName', description: '要寻找的方块类型。' },
+            'search_range': { type: 'float', description: '搜索范围。最小 32。', domain: [10, 512, '[]'] }
         },
         perform: runAsAction(async (agent, block_type, range) => {
             if (range < 32) {
@@ -162,10 +386,10 @@ export const actionsList = [
     },
     {
         name: '!searchForEntity',
-        description: 'Find and go to the nearest entity of a given type in a given range.',
+        description: '在指定范围内寻找并前往最近的指定类型实体。',
         params: {
-            'type': { type: 'string', description: 'The type of entity to go to.' },
-            'search_range': { type: 'float', description: 'The range to search for the entity.', domain: [32, 512] }
+            'type': { type: 'string', description: '要寻找的实体类型。' },
+            'search_range': { type: 'float', description: '搜索范围。', domain: [32, 512] }
         },
         perform: runAsAction(async (agent, entity_type, range) => {
             await skills.goToNearestEntity(agent.bot, entity_type, 4, range);
@@ -173,8 +397,8 @@ export const actionsList = [
     },
     {
         name: '!moveAway',
-        description: 'Move away from the current location in any direction by a given distance.',
-        params: {'distance': { type: 'float', description: 'The distance to move away.', domain: [0, Infinity] }},
+        description: '向任意方向离开当前位置一段距离。',
+        params: { 'distance': { type: 'float', description: '离开的距离。', domain: [0, Infinity] } },
         perform: runAsAction(async (agent, distance) => {
             await skills.moveAway(agent.bot, distance);
         })
@@ -194,13 +418,13 @@ export const actionsList = [
     },
     {
         name: '!rememberPlace',
-        description: '把指定坐标存为命名地点，用于记录别人报的坐标或远处地点。例：!rememberPlace("大村",-1074,63,-480,"zygame1314发现的村庄")。已存在同名会更新。',
+        description: '把指定坐标存为命名地点，用于记录别人报的坐标或远处地点。例：!rememberPlace("村庄",-1074,63,-480,"玩家发现的村庄")。已存在同名会更新。',
         params: {
             'name': { type: 'string', description: '地点名，例如 "大村"、"地狱门"。' },
             'x': { type: 'float', description: 'X 坐标。', domain: [-Infinity, Infinity] },
             'y': { type: 'float', description: 'Y 坐标。', domain: [-64, 320] },
             'z': { type: 'float', description: 'Z 坐标。', domain: [-Infinity, Infinity] },
-            'note': { type: 'string', description: '可选备注，例如 "zygame1314发现的村庄"、"岩浆池"。', optional: true }
+            'note': { type: 'string', description: '可选备注，例如 "玩家发现的村庄"、"岩浆池"。', optional: true }
         },
         perform: async function (agent, name, x, y, z, note) {
             agent.memory_bank.rememberPlace(name, x, y, z, note || '');
@@ -209,8 +433,8 @@ export const actionsList = [
     },
     {
         name: '!goToRememberedPlace',
-        description: 'Go to a saved location.',
-        params: {'name': { type: 'string', description: 'The name of the location to go to.' }},
+        description: '前往之前保存的地点。',
+        params: { 'name': { type: 'string', description: '要前往的地点名称。' } },
         perform: runAsAction(async (agent, name) => {
             const resolved = agent.memory_bank.resolvePlaceName(name);
             if (!resolved) {
@@ -227,11 +451,11 @@ export const actionsList = [
     },
     {
         name: '!givePlayer',
-        description: 'Give the specified item to the given player.',
-        params: { 
-            'player_name': { type: 'string', description: 'The name of the player to give the item to.' }, 
-            'item_name': { type: 'ItemName', description: 'The name of the item to give.' },
-            'num': { type: 'int', description: 'The number of items to give.', domain: [1, Number.MAX_SAFE_INTEGER] }
+        description: '将指定物品交给指定玩家。',
+        params: {
+            'player_name': { type: 'string', description: '接收物品的玩家名称。' },
+            'item_name': { type: 'ItemName', description: '要给予的物品名称。' },
+            'num': { type: 'int', description: '给予物品的数量。', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, player_name, item_name, num) => {
             await skills.giveToPlayer(agent.bot, item_name, player_name, num);
@@ -239,23 +463,23 @@ export const actionsList = [
     },
     {
         name: '!consume',
-        description: 'Eat/drink the given item.',
-        params: {'item_name': { type: 'ItemName', description: 'The name of the item to consume.' }},
+        description: '食用/饮用指定物品。',
+        params: { 'item_name': { type: 'ItemName', description: '要消费的物品名称。' } },
         perform: runAsAction(async (agent, item_name) => {
             await skills.consume(agent.bot, item_name);
         })
     },
     {
         name: '!equip',
-        description: 'Equip the given item.',
-        params: {'item_name': { type: 'ItemName', description: 'The name of the item to equip.' }},
+        description: '装备指定物品。',
+        params: { 'item_name': { type: 'ItemName', description: '要装备的物品名称。' } },
         perform: runAsAction(async (agent, item_name) => {
             await skills.equip(agent.bot, item_name);
         })
     },
     {
         name: '!putInChest',
-        description: '把物品放进箱子。可用箱子名字（!rememberChest 记过的）或坐标。例：!putInChest("coal",2,"矿物箱") 或 !putInChest("coal",2,-694,60,-235)。不传箱子名/坐标则用最近的箱子。',
+        description: '把物品放进箱子。可用箱子名字或坐标。例：!putInChest("coal",2,"矿物箱") 或 !putInChest("coal",2,-694,60,-235)。不传则用最近的箱子。',
         params: {
             'item_name': { type: 'ItemName', description: '要放的物品名。' },
             'num': { type: 'int', description: '数量。', domain: [1, Number.MAX_SAFE_INTEGER] },
@@ -301,7 +525,7 @@ export const actionsList = [
     },
     {
         name: '!viewNearbyChests',
-        description: '列出附近所有箱子的坐标和内容，并标注已记忆的箱子名（[矿物箱]）和未命名的（[未命名]）。用这个一次看清所有箱子，再用坐标或别名操作 !viewChest/!putInChest/!takeFromChest。',
+        description: '列出附近所有箱子的坐标和内容。用这个一次看清所有箱子，再用坐标或别名操作 !viewChest/!putInChest/!takeFromChest。',
         params: {
             'range': { type: 'int', description: 'The search radius in blocks. Defaults to 32.', optional: true, domain: [1, 128], default: 32 }
         },
@@ -311,10 +535,10 @@ export const actionsList = [
     },
     {
         name: '!discard',
-        description: 'Discard the given item from the inventory.',
+        description: '从背包中丢弃指定物品。',
         params: {
-            'item_name': { type: 'ItemName', description: 'The name of the item to discard.' },
-            'num': { type: 'int', description: 'The number of items to discard.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'item_name': { type: 'ItemName', description: '要丢弃的物品名称。' },
+            'num': { type: 'int', description: '丢弃的数量。', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, item_name, num) => {
             const start_loc = agent.bot.entity.position;
@@ -325,21 +549,118 @@ export const actionsList = [
     },
     {
         name: '!collectBlocks',
-        description: 'Collect the nearest blocks of a given type. For ores use the base name (e.g. "diamond", "iron", "coal"); deepslate variants are auto-included. Give the amount based on how many you found via !searchForBlock.',
+        description: '收集最近的指定类型方块。矿石类使用基础名（如 "diamond"）将自动包含深板岩变体。',
         params: {
-            'type': { type: 'BlockName', description: 'The block type to collect.' },
-            'num': { type: 'int', description: 'The number of blocks to collect.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'type': { type: 'BlockName', description: '要收集的方块类型。' },
+            'num': { type: 'int', description: '收集数量。', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, type, num) => {
             await skills.collectBlock(agent.bot, type, num);
         }, false, 10) // 10 minute timeout
     },
     {
-        name: '!craftRecipe',
-        description: 'Craft the given recipe a given number of times.',
+        name: '!buildStructure',
+        description: '在当前位置按照模板搭建筑，请先准备好材料。',
         params: {
-            'recipe_name': { type: 'ItemName', description: 'The name of the output item to craft.' },
-            'num': { type: 'int', description: 'The number of times to craft the recipe. This is NOT the number of output items, as it may craft many more items depending on the recipe.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'type': { type: 'string', description: '蓝图名（如 small_wood_house，用 !listBlueprints 看全部）或模板名（house/wall/pillar/floor）。' },
+            'block': { type: 'BlockName', description: '主体方块（仅 wall/pillar/floor 简单模板用，默认 oak_planks）。', optional: true },
+            'width': { type: 'int', description: '宽度（仅 wall/floor 简单模板用）。', optional: true, domain: [1, 32] },
+            'height': { type: 'int', description: '高度（仅 wall/pillar 简单模板用）。', optional: true, domain: [1, 32] }
+        },
+        perform: runAsAction(async (agent, type, block, width, height) => {
+            const p = agent.bot.entity.position;
+            const sx = Math.floor(p.x), sy = Math.floor(p.y), sz = Math.floor(p.z);
+            // 1) 先查社区蓝图目录（带门窗床箱屋顶的精致蓝图）
+            const found = findCommunityBlueprint((type || '').trim());
+            if (found) {
+                const { bp, name } = found;
+                skills.log(agent.bot, `使用社区蓝图 "${name}"（${bp.blocks.length} 层，offset=${bp.offset}）。`);
+                const blueprint = communityBlueprintToLevels(agent.bot, bp, sx, sy, sz);
+                await skills.buildStructure(agent.bot, blueprint);
+                return;
+            }
+            // 2) 再退回简单模板
+            const blueprint = makePresetBlueprint(type || 'house', block || 'oak_planks', width, height, p.x, p.y, p.z);
+            if (!blueprint) {
+                const community = loadCommunityBlueprints();
+                const known = Object.keys(community).join(', ') || '（无）';
+                skills.log(agent.bot, `未知蓝图/模板 "${type}"。可用社区蓝图：${known}。简单模板：house / wall / pillar / floor。`);
+                return;
+            }
+            await skills.buildStructure(agent.bot, blueprint);
+        }, false, 20)
+    },
+    {
+        name: '!listBlueprints',
+        description: '列出所有可用的建筑蓝图名，供 !buildStructure 使用。',
+        params: {},
+        perform: runAsAction(async (agent) => {
+            const community = loadCommunityBlueprints();
+            const names = Object.keys(community);
+            let msg = `可用社区蓝图（${names.length} 个，自带门窗床箱，推荐）：\n`;
+            for (const n of names) {
+                const bp = community[n];
+                const sx = bp.blocks[0][0].length, sz = bp.blocks[0].length, sy = bp.blocks.length;
+                msg += `  - ${n}（${sx}x${sz}x${sy} 层${bp.offset != 0 ? '，含地下' + (-bp.offset) + '层' : ''}）\n`;
+            }
+            msg += `简单模板：house（5x5带门窗小屋）/ wall / pillar / floor（用 block/width/height 参数）。`;
+            skills.log(agent.bot, msg);
+        })
+    },
+    {
+        name: '!blueprintMaterials',
+        description: '查看建造某蓝图需要哪些材料，并与当前背包对比，告诉你缺多少。生存模式搭建筑前先查这个。',
+        params: {
+            'type': { type: 'string', description: '蓝图名（用 !listBlueprints 看全部）。' }
+        },
+        perform: runAsAction(async (agent, type) => {
+            const found = findCommunityBlueprint((type || '').trim());
+            if (!found) {
+                const community = loadCommunityBlueprints();
+                const known = Object.keys(community).join(', ') || '（无）';
+                skills.log(agent.bot, `没找到蓝图 "${type}"。可用蓝图：${known}。`);
+                return;
+            }
+            const { bp, name } = found;
+            const need = blueprintMaterialCounts(bp);
+            const inv = world.getInventoryCounts(agent.bot);
+            // 分类：已有/不足/完全缺
+            const sorted = Object.entries(need).sort((a, b) => b[1] - a[1]);
+            let lines = [`蓝图 "${name}"（${bp.blocks.length} 层）所需材料：`];
+            let totalSlots = sorted.length;
+            let totalMissing = 0;
+            const missing = [];
+            for (const [item, count] of sorted) {
+                const have = inv[item] || 0;
+                if (have >= count) {
+                    lines.push(`  ${item}: 需 ${count}（已有 ${have}，够）`);
+                } else if (have > 0) {
+                    const lack = count - have;
+                    totalMissing += lack;
+                    missing.push(`${item}x${lack}`);
+                    lines.push(`  ${item}: 需 ${count}（已有 ${have}，缺 ${lack}）`);
+                } else {
+                    totalMissing += count;
+                    missing.push(`${item}x${count}`);
+                    lines.push(`  ${item}: 需 ${count}（背包没有，全缺）`);
+                }
+            }
+            lines.push(`共 ${totalSlots} 种材料，缺 ${totalMissing} 块。`);
+            if (missing.length > 0) {
+                lines.push(`缺料清单：${missing.join(', ')}。`);
+                lines.push(`用 !collectBlock <方块名> <数量> 去采集，或 !craftRecipe 合成后重新查。`);
+            } else {
+                lines.push(`材料齐全，可以 !buildStructure ${name} 了。`);
+            }
+            skills.log(agent.bot, lines.join('\n'));
+        })
+    },
+    {
+        name: '!craftRecipe',
+        description: '按照给定配方制作指定次数的物品。',
+        params: {
+            'recipe_name': { type: 'ItemName', description: '要制作的输出物品名称。' },
+            'num': { type: 'int', description: '执行配方的次数。这并非输出物品的总数，因为具体数量取决于配方。', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, recipe_name, num) => {
             await skills.craftRecipe(agent.bot, recipe_name, num);
@@ -347,10 +668,10 @@ export const actionsList = [
     },
     {
         name: '!smeltItem',
-        description: 'Smelt the given item the given number of times.',
+        description: '冶炼指定物品，执行指定次数。',
         params: {
-            'item_name': { type: 'ItemName', description: 'The name of the input item to smelt.' },
-            'num': { type: 'int', description: 'The number of times to smelt the item.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'item_name': { type: 'ItemName', description: '要冶炼的输入物品名称。' },
+            'num': { type: 'int', description: '要冶炼的数量。', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, item_name, num) => {
             await skills.smeltItem(agent.bot, item_name, num);
@@ -358,19 +679,19 @@ export const actionsList = [
     },
     {
         name: '!clearFurnace',
-        description: 'Take all items out of the nearest furnace.',
-        params: { },
+        description: '取走最近熔炉中的所有物品。',
+        params: {},
         perform: runAsAction(async (agent) => {
             await skills.clearNearestFurnace(agent.bot);
         })
     },
     {
         name: '!combineAtAnvil',
-        description: 'Combine two items at an anvil. Used to repair tools/armor (combine two of the same damaged item) or to transfer enchantments from an enchanted_book onto an item. Requires an anvil nearby or in inventory, and costs experience levels.',
+        description: '在铁砧上组合两个物品（修复工具/盔甲或转移附魔）。需要附近有铁砧，消耗经验。',
         params: {
-            'item_one': { type: 'ItemName', description: 'The target item to repair or merge enchantments onto.' },
-            'item_two': { type: 'ItemName', description: 'The sacrifice item (same type to repair, or enchanted_book to transfer enchantments).' },
-            'new_name': { type: 'string', description: 'Optional new name for the result item. Pass empty string to skip renaming.', default: '' }
+            'item_one': { type: 'ItemName', description: '目标物品。' },
+            'item_two': { type: 'ItemName', description: '牺牲物品（相同类型修复，或附魔书转移附魔）。' },
+            'new_name': { type: 'string', description: '结果物品的可选新名称。', default: '' }
         },
         perform: runAsAction(async (agent, item_one, item_two, new_name) => {
             await skills.combineItemsAtAnvil(agent.bot, item_one, item_two, new_name || null);
@@ -378,19 +699,19 @@ export const actionsList = [
     },
     {
         name: '!renameAtAnvil',
-        description: 'Rename an item at an anvil. Costs experience levels. Requires an anvil nearby or in inventory.',
+        description: '在铁砧上重命名物品，消耗经验。需要附近有铁砧。',
         params: {
-            'item_name': { type: 'ItemName', description: 'The item to rename.' },
-            'new_name': { type: 'string', description: 'The new name to give the item.' }
+            'item_name': { type: 'ItemName', description: '要重命名的物品。' },
+            'new_name': { type: 'string', description: '新名称。' }
         },
         perform: runAsAction(async (agent, item_name, new_name) => {
             await skills.renameItemAtAnvil(agent.bot, item_name, new_name);
         })
     },
-        {
+    {
         name: '!placeHere',
         description: 'Place a given block in the current location. Do NOT use to build structures, only use for single blocks/torches.',
-        params: {'type': { type: 'BlockOrItemName', description: 'The block type to place.' }},
+        params: { 'type': { type: 'BlockOrItemName', description: 'The block type to place.' } },
         perform: runAsAction(async (agent, type) => {
             let pos = agent.bot.entity.position;
             await skills.placeBlock(agent.bot, type, pos.x, pos.y, pos.z);
@@ -398,16 +719,16 @@ export const actionsList = [
     },
     {
         name: '!attack',
-        description: 'Attack and kill the nearest entity of a given type.',
-        params: {'type': { type: 'string', description: 'The type of entity to attack.'}},
+        description: '攻击并杀死最近的指定类型实体。',
+        params: { 'type': { type: 'string', description: '要攻击的实体类型。' } },
         perform: runAsAction(async (agent, type) => {
             await skills.attackNearest(agent.bot, type, true);
         })
     },
     {
         name: '!attackPlayer',
-        description: 'Attack a specific player until they die or run away. Remember this is just a game and does not cause real life harm.',
-        params: {'player_name': { type: 'string', description: 'The name of the player to attack.'}},
+        description: '攻击指定玩家直到其死亡或逃跑。请记住这只是个游戏，不会造成现实伤害。',
+        params: { 'player_name': { type: 'string', description: '要攻击的玩家名称。' } },
         perform: runAsAction(async (agent, player_name) => {
             let player = agent.bot.players[player_name]?.entity;
             if (!player) {
@@ -419,41 +740,41 @@ export const actionsList = [
     },
     {
         name: '!goToBed',
-        description: 'Go to the nearest bed and sleep.',
+        description: '前往最近的床并睡觉。',
         perform: runAsAction(async (agent) => {
             await skills.goToBed(agent.bot);
         })
     },
     {
         name: '!stay',
-        description: 'Stay in the current location no matter what. Pauses all modes.',
-        params: {'type': { type: 'int', description: 'The number of seconds to stay. -1 for forever.', domain: [-1, Number.MAX_SAFE_INTEGER] }},
+        description: '在当前位置停留，无论发生什么。暂停所有模式。',
+        params: { 'type': { type: 'int', description: '停留的秒数。-1 为永久。', domain: [-1, Number.MAX_SAFE_INTEGER] } },
         perform: runAsAction(async (agent, seconds) => {
             await skills.stay(agent.bot, seconds);
         })
     },
     {
         name: '!setMode',
-        description: 'Set a mode to on or off. A mode is an automatic behavior that constantly checks and responds to the environment.',
+        description: '开启或关闭某个模式。模式是一种持续检查环境并作出响应的自动行为。',
         params: {
-            'mode_name': { type: 'string', description: 'The name of the mode to enable.' },
-            'on': { type: 'boolean', description: 'Whether to enable or disable the mode.' }
+            'mode_name': { type: 'string', description: '要启用/禁用的模式名称。' },
+            'on': { type: 'boolean', description: '是否启用该模式。' }
         },
         perform: async function (agent, mode_name, on) {
             const modes = agent.bot.modes;
             if (!modes.exists(mode_name))
-            return `Mode ${mode_name} does not exist.` + modes.getDocs();
+                return `Mode ${mode_name} does not exist.` + modes.getDocs();
             if (modes.isOn(mode_name) === on)
-            return `Mode ${mode_name} is already ${on ? 'on' : 'off'}.`;
+                return `Mode ${mode_name} is already ${on ? 'on' : 'off'}.`;
             modes.setOn(mode_name, on);
             return `Mode ${mode_name} is now ${on ? 'on' : 'off'}.`;
         }
     },
     {
         name: '!goal',
-        description: 'Set a goal prompt to endlessly work towards with continuous self-prompting.',
+        description: '设置一个目标提示词，通过持续的自我提示不断地朝着该目标努力。',
         params: {
-            'selfPrompt': { type: 'string', description: 'The goal prompt.' },
+            'selfPrompt': { type: 'string', description: '目标提示词。' },
         },
         perform: async function (agent, prompt) {
             if (convoManager.inConversation()) {
@@ -466,7 +787,7 @@ export const actionsList = [
     },
     {
         name: '!endGoal',
-        description: 'Call when you have accomplished your goal. It will stop self-prompting and the current action. ',
+        description: '在达成目标时调用。它将停止自我提示和当前动作。',
         perform: async function (agent) {
             agent.self_prompter.stop();
             return 'Self-prompting stopped.';
@@ -474,19 +795,19 @@ export const actionsList = [
     },
     {
         name: '!showVillagerTrades',
-        description: 'Show trades of a specified villager.',
-        params: {'id': { type: 'int', description: 'The id number of the villager that you want to trade with.' }},
+        description: '显示指定村民的交易内容。',
+        params: { 'id': { type: 'int', description: '要与之交易的村民 ID 编号。' } },
         perform: runAsAction(async (agent, id) => {
             await skills.showVillagerTrades(agent.bot, id);
         })
     },
     {
         name: '!tradeWithVillager',
-        description: 'Trade with a specified villager.',
+        description: '与指定村民进行交易。',
         params: {
-            'id': { type: 'int', description: 'The id number of the villager that you want to trade with.' },
-            'index': { type: 'int', description: 'The index of the trade you want executed (1-indexed).', domain: [1, Number.MAX_SAFE_INTEGER] },
-            'count': { type: 'int', description: 'How many times that trade should be executed.', domain: [1, Number.MAX_SAFE_INTEGER] },
+            'id': { type: 'int', description: '村民的 ID 编号。' },
+            'index': { type: 'int', description: '要执行的交易索引（从 1 开始计数）。', domain: [1, Number.MAX_SAFE_INTEGER] },
+            'count': { type: 'int', description: '该交易要执行的次数。', domain: [1, Number.MAX_SAFE_INTEGER] },
         },
         perform: runAsAction(async (agent, id, index, count) => {
             await skills.tradeWithVillager(agent.bot, id, index, count);
@@ -494,15 +815,15 @@ export const actionsList = [
     },
     {
         name: '!startConversation',
-        description: 'Start a conversation with a bot. (FOR OTHER BOTS ONLY)',
+        description: '与另一个 Bot 开始对话。（仅限其他 Bot）',
         params: {
-            'player_name': { type: 'string', description: 'The name of the player to send the message to.' },
-            'message': { type: 'string', description: 'The message to send.' },
+            'player_name': { type: 'string', description: '要发送消息的玩家名称。' },
+            'message': { type: 'string', description: '要发送的消息内容。' },
         },
         perform: async function (agent, player_name, message) {
             if (!convoManager.isOtherAgent(player_name))
                 return player_name + ' is not a bot, cannot start conversation.';
-            if (convoManager.inConversation() && !convoManager.inConversation(player_name)) 
+            if (convoManager.inConversation() && !convoManager.inConversation(player_name))
                 convoManager.forceEndCurrentConversation();
             else if (convoManager.inConversation(player_name))
                 agent.history.add('system', 'You are already in conversation with ' + player_name + '. Don\'t use this command to talk to them.');
@@ -511,9 +832,9 @@ export const actionsList = [
     },
     {
         name: '!endConversation',
-        description: 'End the conversation with the given bot. (FOR OTHER BOTS ONLY)',
+        description: '结束与指定 Bot 的对话。（仅限其他 Bot）',
         params: {
-            'player_name': { type: 'string', description: 'The name of the player to end the conversation with.' }
+            'player_name': { type: 'string', description: '要结束对话的玩家名称。' }
         },
         perform: async function (agent, player_name) {
             if (!convoManager.inConversation(player_name))
@@ -524,15 +845,15 @@ export const actionsList = [
     },
     {
         name: '!lookAtPlayer',
-        description: 'Look at a player or look in the same direction as the player.',
+        description: '看向玩家，或与玩家看向同一方向。',
         params: {
-            'player_name': { type: 'string', description: 'Name of the target player' },
+            'player_name': { type: 'string', description: '目标玩家名称' },
             'direction': {
                 type: 'string',
-                description: 'How to look ("at": look at the player, "with": look in the same direction as the player)',
+                description: '查看方式 ("at": 看向玩家, "with": 与玩家看向同一方向)',
             }
         },
-        perform: async function(agent, player_name, direction) {
+        perform: async function (agent, player_name, direction) {
             if (direction !== 'at' && direction !== 'with') {
                 return "Invalid direction. Use 'at' or 'with'.";
             }
@@ -546,13 +867,13 @@ export const actionsList = [
     },
     {
         name: '!lookAtPosition',
-        description: 'Look at specified coordinates.',
+        description: '看向指定的坐标。',
         params: {
-            'x': { type: 'int', description: 'x coordinate' },
-            'y': { type: 'int', description: 'y coordinate' },
-            'z': { type: 'int', description: 'z coordinate' }
+            'x': { type: 'int', description: 'x 坐标' },
+            'y': { type: 'int', description: 'y 坐标' },
+            'z': { type: 'int', description: 'z 坐标' }
         },
-        perform: async function(agent, x, y, z) {
+        perform: async function (agent, x, y, z) {
             let result = "";
             const actionFn = async () => {
                 result = await agent.vision_interpreter.lookAtPosition(x, y, z);
@@ -563,15 +884,15 @@ export const actionsList = [
     },
     {
         name: '!digDown',
-        description: 'Digs down a specified distance. Will stop if it reaches lava, water, or a fall of >=4 blocks below the bot.',
-        params: {'distance': { type: 'int', description: 'Distance to dig down', domain: [1, Number.MAX_SAFE_INTEGER] }},
+        description: '向下挖掘指定距离。如果到达岩浆、水或下方有 >=4 格的掉落将停止。',
+        params: { 'distance': { type: 'int', description: '向下挖掘的距离', domain: [1, Number.MAX_SAFE_INTEGER] } },
         perform: runAsAction(async (agent, distance) => {
             await skills.digDown(agent.bot, distance)
         })
     },
     {
         name: '!goToSurface',
-        description: 'Moves the bot to the highest block above it (usually the surface).',
+        description: '将 Bot 移至其上方的最高方块（通常是地表）。',
         params: {},
         perform: runAsAction(async (agent) => {
             await skills.goToSurface(agent.bot);
@@ -579,7 +900,7 @@ export const actionsList = [
     },
     {
         name: '!goToShore',
-        description: '从水里/岸边爬上岸。若在水中会朝最近的岸跳出水面，若在陆地上则走到最近的岸边。',
+        description: '从水里/岸边爬上岸。',
         params: {},
         perform: runAsAction(async (agent) => {
             await skills.goToShore(agent.bot);
@@ -587,9 +908,9 @@ export const actionsList = [
     },
     {
         name: '!fish',
-        description: 'Equip a fishing rod and fish. Waits up to the given timeout for a bite.',
+        description: '装备钓鱼竿并钓鱼。等待直到有鱼上钩或达到指定超时时间。',
         params: {
-            'timeout_ms': { type: 'int', description: 'Maximum milliseconds to wait for a bite. Defaults to 60000.', domain: [1000, Number.MAX_SAFE_INTEGER] }
+            'timeout_ms': { type: 'int', description: '等待上钩的最大毫秒数。默认为 60000。', domain: [1000, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, timeout_ms) => {
             await skills.fish(agent.bot, timeout_ms || 60000);
@@ -597,12 +918,12 @@ export const actionsList = [
     },
     {
         name: '!tillAndSow',
-        description: 'Till the ground at the given position and optionally plant the given seed type.',
+        description: '在给定位置耕地，并可选地种植指定类型的种子。',
         params: {
-            'x': { type: 'int', description: 'The x coordinate to till.' },
-            'y': { type: 'int', description: 'The y coordinate to till.', domain: [-64, 320] },
-            'z': { type: 'int', description: 'The z coordinate to till.' },
-            'seed_type': { type: 'string', description: 'The item name of the seed to plant, or empty to only till the ground.' }
+            'x': { type: 'int', description: '耕地的 x 坐标。' },
+            'y': { type: 'int', description: '耕地的 y 坐标。', domain: [-64, 320] },
+            'z': { type: 'int', description: '耕地的 z 坐标。' },
+            'seed_type': { type: 'string', description: '要种植的种子名称，为空则仅耕地。' }
         },
         perform: runAsAction(async (agent, x, y, z, seed_type) => {
             await skills.tillAndSow(agent.bot, x, y, z, seed_type || null);
@@ -610,10 +931,10 @@ export const actionsList = [
     },
     {
         name: '!useOn',
-        description: 'Use (right click) the given tool on the nearest target of the given type.',
+        description: '在最近的指定类型目标上使用给定的工具（右键）。',
         params: {
-            'tool_name': { type: 'string', description: 'Name of the tool to use, or "hand" for no tool.' },
-            'target': { type: 'string', description: 'The target as an entity type, block type, or "nothing" for no target.' }
+            'tool_name': { type: 'string', description: '要使用的工具名称，或 "hand" 表示空手。' },
+            'target': { type: 'string', description: '目标，可以是实体类型、方块类型，或 "nothing" 表示无目标。' }
         },
         perform: runAsAction(async (agent, tool_name, target) => {
             await skills.useToolOn(agent.bot, tool_name, target);
@@ -621,13 +942,13 @@ export const actionsList = [
     },
     {
         name: '!rememberChest',
-        description: '给箱子记个别名+用途，之后靠用途找箱子，不记具体物品（物品会变，要看用 !viewChest）。例：!rememberChest("矿物箱","存挖到的矿石和锭")。可用坐标精确指定：!rememberChest("矿物箱","存矿石",-689,60,-236)',
+        description: '给箱子记录别名和用途。例：!rememberChest("矿物箱","存矿石")。可选坐标精确指定。',
         params: {
-            'name': { type: 'string', description: '箱子别名，例如 "矿物箱"、"食物箱"。' },
-            'purpose': { type: 'string', description: '这个箱子干啥用的，例如 "存挖到的矿石"、"放食物和农作物"。' },
-            'chest_x': { type: 'int', description: '目标箱子 x 坐标，省略则用最近箱子（5 格内）。', optional: true, domain: [-Infinity, Infinity] },
-            'chest_y': { type: 'int', description: '目标箱子 y 坐标。', optional: true, domain: [-64, 320] },
-            'chest_z': { type: 'int', description: '目标箱子 z 坐标。', optional: true, domain: [-Infinity, Infinity] }
+            'name': { type: 'string', description: '箱子别名。' },
+            'purpose': { type: 'string', description: '用途描述。' },
+            'chest_x': { type: 'int', description: 'x 坐标，省略则用最近箱子。', optional: true, domain: [-Infinity, Infinity] },
+            'chest_y': { type: 'int', description: 'y 坐标。', optional: true, domain: [-64, 320] },
+            'chest_z': { type: 'int', description: 'z 坐标。', optional: true, domain: [-Infinity, Infinity] }
         },
         perform: runAsAction(async (agent, name, purpose, chest_x, chest_y, chest_z) => {
             const bot = agent.bot;
@@ -645,8 +966,8 @@ export const actionsList = [
             try {
                 const t = chest._properties?.type;
                 if (t === 'left' || t === 'right') {
-                    const adj = [[1,0,0],[-1,0,0],[0,0,1],[0,0,-1]];
-                    for (const [dx,dy,dz] of adj) {
+                    const adj = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]];
+                    for (const [dx, dy, dz] of adj) {
                         const nb = bot.blockAt(chest.position.offset(dx, dy, dz));
                         if (nb && nb.name === chest.name && skills.isChestOtherHalf(chest, nb)) {
                             positions.push([nb.position.x, nb.position.y, nb.position.z]);
@@ -654,7 +975,7 @@ export const actionsList = [
                         }
                     }
                 }
-            } catch (_) {}
+            } catch (_) { }
             const pos = positions[0];
             // findChestByPos 精确匹配任一组成方块。若命中已命名箱子，说明在改名/重记，
             // 显式删旧条目再记新的，避免同一物理箱子留多条记录。
@@ -694,8 +1015,8 @@ export const actionsList = [
     },
     {
         name: '!findChest',
-        description: '用自然语言描述需求，自动匹配最合适的已记箱子（embedding 语义匹配）。例：!findChest("我要放铁矿") !findChest("找点吃的")。返回箱子名+坐标+用途，可直接用名字调 !putInChest/!takeFromChest。',
-        params: { 'query': { type: 'string', description: '需求描述，如"存红石元件"、"拿武器去打架"。' } },
+        description: '用自然语言匹配最合适的已记箱子。例：!findChest("找点吃的")。',
+        params: { 'query': { type: 'string', description: '需求描述。' } },
         perform: async function (agent, query) {
             if (!query) return '请描述你要找什么箱子，例：!findChest("存挖到的矿石")';
             const emb = agent.prompter?.embedding_model || null;
@@ -716,8 +1037,8 @@ export const actionsList = [
     },
     {
         name: '!rememberNote',
-        description: '记一条自由文本笔记（关键事实、提醒、玩家偏好等），长期保留，不会随摘要覆盖丢失。例：!rememberNote("zygame1314喜欢生鱼")',
-        params: { 'text': { type: 'string', description: '笔记内容，尽量简短。' } },
+        description: '记录一条简短的自由文本笔记。',
+        params: { 'text': { type: 'string', description: '笔记内容。' } },
         perform: async function (agent, text) {
             const ok = agent.memory_bank.addNote(text);
             return ok ? `已记笔记："${text}"` : '笔记为空或已存在。';
@@ -725,8 +1046,8 @@ export const actionsList = [
     },
     {
         name: '!recallNote',
-        description: '回忆笔记。不带参数列出最近所有笔记；带关键词列出含该词的笔记。例：!recallNote("zygame1314")',
-        params: { 'keyword': { type: 'string', description: '关键词，省略则列全部。', optional: true } },
+        description: '查询笔记。不带参数列出全部；带关键词筛选。',
+        params: { 'keyword': { type: 'string', description: '关键词。', optional: true } },
         perform: async function (agent, keyword) {
             const notes = agent.memory_bank.recallNotes(keyword || null);
             if (notes.length === 0) return keyword ? `没有含 "${keyword}" 的笔记。` : '还没有笔记。';
@@ -735,7 +1056,7 @@ export const actionsList = [
     },
     {
         name: '!rememberFact',
-        description: '记一条永久事实，永不会被对话摘要覆盖，适合最重要、最该一直记得的东西。例：!rememberFact("我的基地在主世界西南")',
+        description: '记录一条永久事实（不会被摘要覆盖）。',
         params: { 'text': { type: 'string', description: '事实内容。' } },
         perform: async function (agent, text) {
             const ok = agent.memory_bank.addFact(text);
@@ -744,10 +1065,10 @@ export const actionsList = [
     },
     {
         name: '!forget',
-        description: '删除记忆。可删地点、箱子、笔记、永久事实。关键词命中即删。例：!forget("place","旧矿") !forget("note","生鱼") !forget("all")',
+        description: '删除记忆。支持：place, chest, note, fact, all。',
         params: {
-            'kind': { type: 'string', description: '记忆类型：place / chest / note / fact / all。' },
-            'keyword': { type: 'string', description: '要删除的关键词。', optional: true }
+            'kind': { type: 'string', description: '记忆类型。' },
+            'keyword': { type: 'string', description: '删除关键词。', optional: true }
         },
         perform: async function (agent, kind, keyword) {
             const mb = agent.memory_bank;

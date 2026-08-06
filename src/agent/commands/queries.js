@@ -149,7 +149,24 @@ export const queryList = [
                 lines.push({ dist: r.dist, text: `${name} @(${r.dx >= 0 ? '+' : ''}${r.dx},${r.dy >= 0 ? '+' : ''}${r.dy},${r.dz >= 0 ? '+' : ''}${r.dz}) d=${r.dist.toFixed(1)} [${r.headingDir}/${r.worldDir}]` });
             }
             lines.sort((a, b) => a.dist - b.dist);
-            for (const l of lines.slice(0, 30)) res += `\n- ${l.text}`;
+            // 按材质聚合：同材质多处只列最近 2 个位置 + 总数，省 token。
+            // SPACE_OVERVIEW 已有方位聚合，逐格列表只需提供"近处具体在哪"的定位信息。
+            const byMat = {};
+            const matOrder = [];
+            for (const l of lines) {
+                const matName = l.text.split(' @')[0];
+                if (!byMat[matName]) { byMat[matName] = []; matOrder.push(matName); }
+                byMat[matName].push(l);
+            }
+            let shown = 0;
+            for (const mat of matOrder) {
+                if (shown >= 18) break;
+                const arr = byMat[mat];
+                const samples = arr.slice(0, 2).map(l => l.text.split(' d=')[0]).join('; ');
+                const tail = arr.length > 2 ? ` (+${arr.length - 2}处)` : '';
+                res += `\n- ${samples}${tail}`;
+                shown++;
+            }
 
             if (lines.length === 0) {
                 res += ': none';
@@ -354,29 +371,51 @@ export const queryList = [
                 return `@(${r.dx >= 0 ? '+' : ''}${r.dx},${r.dy >= 0 ? '+' : ''}${r.dy},${r.dz >= 0 ? '+' : ''}${r.dz}) (x:${pos.x | 0},y:${pos.y | 0},z:${pos.z | 0})`;
             };
             // 连续段：水平扫描补纵向高度(柱子多高)，垂直扫描给垂直延伸。AI 一眼看高度。
+            // 按材质+液体标志聚合：同材质被零散物（花/火把）打断的段合并展示，
+            // 只保留最远一段的起止，标注总格数与段数，大幅省 token。
             if (scan.segments.length > 0) {
-                res += '\nSEGMENTS (连续实体段, 材质/尺寸/起止):';
-                for (const s of scan.segments.slice(0, 8)) {
+                const agg = {};
+                const order = [];
+                for (const s of scan.segments) {
+                    const key = (s.liquid ? 'L|' : '') + s.name;
+                    if (!agg[key]) { agg[key] = { name: s.name, liquid: s.liquid, total: 0, segs: [] }; order.push(key); }
+                    agg[key].total += s.len;
+                    agg[key].segs.push(s);
+                }
+                res += '\nSEGMENTS (按材质聚合, 详见起止/总长/段数):';
+                for (const key of order) {
+                    const a = agg[key];
+                    // 展示该材质最远的一段（最远 = endDist 最大），起止更直观
+                    const segs = a.segs;
+                    const last = segs[segs.length - 1];
+                    const first = segs[0];
                     let spanDesc;
-                    if (s.axis === 'y') {
-                        spanDesc = `高${s.len}格`;
+                    if (last.axis === 'y') {
+                        spanDesc = `共高${a.total}格`;
                     } else {
-                        spanDesc = `${s.axis === 'x' ? '宽' : '长'}${s.len}格`;
-                        // 水平扫描时补"该柱/墙的纵向高度"，这是石柱等竖直结构的关键信息
-                        if (s.height) {
-                            const vs = s.verticalSpan;
-                            spanDesc += `, 纵高${s.height}格(y:${vs.botY | 0}→${vs.topY | 0})`;
+                        spanDesc = `${last.axis === 'x' ? '宽' : '长'}共${a.total}格`;
+                        if (last.height) {
+                            const vs = last.verticalSpan;
+                            spanDesc += `, 纵高${last.height}格(y:${vs.botY | 0}→${vs.topY | 0})`;
+                            if (last.reachedTop) spanDesc += ' [通天]';
                         }
                     }
-                    res += `\n- ${s.liquid ? '[液体]' : ''}${s.name} ${spanDesc}: ${fmtRel(s.startPos)}→${fmtRel(s.endPos)}`;
+                    const segCount = segs.length > 1 ? ` (${segs.length}段)` : '';
+                    res += `\n- ${a.liquid ? '[液体]' : ''}${a.name} ${spanDesc}${segCount}: ${fmtRel(first.startPos)}→${fmtRel(last.endPos)}`;
                 }
             }
-            // 前 N 个命中点（细节备份，确认段内具体方块）
-            res += '\nHITS (依次命中, 前15个):';
-            for (const h of scan.hits.slice(0, 15)) {
+            // HITS 砍成只列各材质首次命中（定位用），不再逐格重列段内方块。
+            res += '\nFIRST_HITS (各材质首次命中, 定位用):';
+            const seenKey = new Set();
+            let hitCount = 0;
+            for (const h of scan.hits) {
+                const k = (h.liquid ? 'L|' : '') + h.name;
+                if (seenKey.has(k)) continue;
+                seenKey.add(k);
                 res += `\n- ${h.liquid ? '[液体]' : ''}${h.name} d=${h.dist} ${fmtRel(h.pos)}`;
+                hitCount++;
+                if (hitCount >= 12) break;
             }
-            if (scan.hits.length > 15) res += `\n... 共${scan.hits.length}个命中`;
             return pad(res);
         }
     },

@@ -307,23 +307,43 @@ export function scanDirection(bot, direction, maxDist = 64) {
     const axis = (d[0] !== 0) ? 'x' : (d[2] !== 0) ? 'z' : 'y';
 
     // 测一个方块在 y 方向上连续同材质的延伸高度（向上+向下），用于水平扫描时补"柱子多高"。
+    // 上限用世界建筑高度而非 maxDist：否则通天石柱会被截断成"高64格"，
+    // bot 误以为柱子就那么高，意识不到是通天的。同 chunk 内方块都加载，逐格 blockAt 是缓存查询不阻塞。
+    const WORLD_MAX_Y = 320;
+    const WORLD_MIN_Y = -64;
     const measureVertical = (pos, name) => {
         let topY = pos.y, botY = pos.y;
-        for (let y = pos.y + 1; y < pos.y + maxDist; y++) {
+        let reachedTop = false;
+        for (let y = pos.y + 1; y <= WORLD_MAX_Y; y++) {
             const b = bot.blockAt(pos.offset ? pos.offset(0, y - pos.y, 0) : null);
             if (!b || b.name !== name) break;
             topY = y;
         }
-        for (let y = pos.y - 1; y > pos.y - maxDist; y--) {
+        reachedTop = (topY >= WORLD_MAX_Y);
+        for (let y = pos.y - 1; y >= WORLD_MIN_Y; y--) {
             const b = bot.blockAt(pos.offset ? pos.offset(0, y - pos.y, 0) : null);
             if (!b || b.name !== name) break;
             botY = y;
         }
-        return { height: topY - botY + 1, topY, botY };
+        return { height: topY - botY + 1, topY, botY, reachedTop };
     };
 
+    // 水平扫描时每格纵向采样脚下多层（dy: 0,-1,-2,-3）。
+    // 原因：水平射线固定在 bot 脚部 y 层，而水面/沙滩常在更低层
+    // （bot 站岸 y=63，水面 y=62），只扫 y=0 会穿过水面上方空气，看不到海。
+    // 平地仍在 dy=0 命中（行为不变），低处液体/沙滩由 dy<0 补上。
+    const ySamples = isHorizontal ? [0, -1, -2, -3] : [0];
     for (let i = 1; i <= maxDist; i++) {
-        const block = bot.blockAt(bp.offset(d[0] * i, d[1] * i, d[2] * i));
+        let block = null;
+        for (const dy of ySamples) {
+            const b = bot.blockAt(bp.offset(d[0] * i, (d[1] * i) + dy, d[2] * i));
+            if (b && (_isWallLike(b) || _isLiquid(b))) {
+                block = b;
+                break;
+            }
+        }
+        // 没命中实体/液体时取 y=0 那格（空气），保持原"空段"语义
+        if (!block) block = bot.blockAt(bp.offset(d[0] * i, d[1] * i, d[2] * i));
         const name = block ? block.name : 'air';
         const wallLike = _isWallLike(block);
         const liquid = _isLiquid(block);
@@ -332,10 +352,11 @@ export function scanDirection(bot, direction, maxDist = 64) {
             // 连续段：同材质相邻 → 续段；否则结束旧段开新段
             if (cur && cur.name === name) {
                 cur.endPos = block.position;
+                cur.endDist = i;
                 cur.len++;
             } else {
                 if (cur) segments.push(cur);
-                cur = { name, startPos: block.position, endPos: block.position, len: 1, axis, liquid };
+                cur = { name, startPos: block.position, endPos: block.position, len: 1, axis, liquid, startDist: i, endDist: i };
             }
         } else {
             if (cur) { segments.push(cur); cur = null; }
@@ -350,6 +371,7 @@ export function scanDirection(bot, direction, maxDist = 64) {
                 const v = measureVertical(s.startPos, s.name);
                 s.height = v.height;
                 s.verticalSpan = { topY: v.topY, botY: v.botY };
+                s.reachedTop = v.reachedTop;
             } catch (_) { s.height = null; }
         }
     }

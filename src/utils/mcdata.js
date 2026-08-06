@@ -174,10 +174,56 @@ export function initBot(username) {
                     finally { block.material = origMat; }
                 }
                 return _origDigTime(block);
-            } finally {
+            }             finally {
                 if (patched) bot.entity.onGround = origOnGround;
             }
         };
+
+        // 修复 mineflayer creative 插件的槽位死锁 bug：bot.creative.setInventorySlot
+        // 抛错（如 makeItem 给了无效物品让 Item.toNotch 崩、或 timeout 5s 未收 ack）
+        // 时，内部标志 creativeSlotsUpdates[slot] 不被重置（只有成功路径才在末尾
+        // 置 false），导致该槽位后续所有调用立刻 throw "Setting slot N cancelled"，
+        // placeBlock 一旦踩雷就再也放不了任何块。这里用自带 try/finally 标志的版本
+        // 完全替换它：直接写 set_creative_slot 包 + 等待 updateSlot 事件，拒绝/超时
+        // 时都清标志，彻底解死锁。
+        if (bot.creative && typeof bot.creative.setInventorySlot === 'function') {
+            const slotLocks = {};
+            bot.creative.setInventorySlot = async function setInventorySlot (slot, item, waitTimeout = 400) {
+                if (slotLocks[slot]) {
+                    throw new Error(`Setting slot ${slot} cancelled due to calling bot.creative.setInventorySlot(${slot}, ...) again`);
+                }
+                slotLocks[slot] = true;
+                try {
+                    if (item == null) {
+                        bot._client.write('set_creative_slot', { slot, item: null });
+                        bot._setSlot(slot, null);
+                        return;
+                    }
+                    // Item.toNotch 对无效物品（type=null/0）会崩，先校验。
+                    // 注意 prismarine-item 用 item.type 存物品 id，不是 item.id（不存在）。
+                    if (item.type == null || item.type <= 0) {
+                        throw new Error(`无效物品，无法设槽 ${slot}：${item?.name || item}`);
+                    }
+                    const notch = Item.toNotch(item);
+                    bot._client.write('set_creative_slot', { slot, item: notch });
+                    // 本地先反演槽位，让紧接着的 findInventoryItem 不用等服务端 ack 就能拿到
+                    if (typeof bot._setSlot === 'function') bot._setSlot(slot, item);
+                    // 等服务端回 updateSlot 确认（带超时），收不到也只当慢，不锁死
+                    await new Promise((resolve) => {
+                        let done = false;
+                        const onSlot = (oldItem, newItem) => {
+                            if (newItem && newItem.name === item.name && newItem.count === item.count) {
+                                if (!done) { done = true; bot.inventory.off(`updateSlot:${slot}`, onSlot); resolve(); }
+                            }
+                        };
+                        bot.inventory.once(`updateSlot:${slot}`, onSlot);
+                        setTimeout(() => { if (!done) { done = true; bot.inventory.off(`updateSlot:${slot}`, onSlot); resolve(); } }, waitTimeout);
+                    });
+                } finally {
+                    slotLocks[slot] = false;
+                }
+            };
+        }
     });
 
     return bot;

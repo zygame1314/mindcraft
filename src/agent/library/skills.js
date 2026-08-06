@@ -7,71 +7,6 @@ import settings from "../../../settings.js";
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
 const useDelay = blockPlaceDelay > 0;
 
-// 玩家常见建筑方块：导航（goToGoal 破坏性 fallback）和脱困（unstuck 模式）
-// 挖障碍时都应跳过这些方块，避免 bot 把玩家家的墙/屋顶/装饰挖穿脱困。
-// 自然地形（泥土/石头/沙子/矿石等）不在此列，仍可挖以脱困。
-export const protectedBuildingBlocks = [
-    // 木板与原木（墙体）
-    'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks',
-    'dark_oak_planks', 'mangrove_planks', 'cherry_planks', 'bamboo_planks',
-    'crimson_planks', 'warped_planks',
-    'oak_log', 'spruce_log', 'birch_log', 'jungle_log', 'acacia_log', 'dark_oak_log',
-    'mangrove_log', 'cherry_log', 'bamboo', 'crimson_stem', 'warped_stem',
-    'stripped_oak_log', 'stripped_spruce_log', 'stripped_birch_log', 'stripped_jungle_log',
-    'stripped_acacia_log', 'stripped_cherry_log', 'stripped_dark_oak_log',
-    'stripped_mangrove_log', 'stripped_crimson_stem', 'stripped_warped_stem',
-    // 石砖与建筑石材（含深板岩砖，玩家常用于建房）
-    'stone_bricks', 'mossy_stone_bricks', 'cracked_stone_bricks', 'chiseled_stone_bricks',
-    'deepslate_bricks', 'cracked_deepslate_bricks', 'nether_bricks', 'red_nether_bricks',
-    'mud_bricks', 'end_stone_bricks', 'quartz_bricks', 'sandstone', 'cut_sandstone',
-    'red_sandstone', 'cut_red_sandstone', 'bricks', 'polished_blackstone_bricks',
-    // 楼梯/台阶/墙/栅栏（建筑构件）
-    'stone_stairs', 'cobblestone_stairs', 'stone_brick_stairs', 'mossy_stone_brick_stairs',
-    'cobblestone_wall', 'stone_brick_wall', 'mossy_cobblestone_wall', 'brick_wall',
-    'oak_fence', 'spruce_fence', 'birch_fence', 'jungle_fence', 'acacia_fence',
-    'dark_oak_fence', 'mangrove_fence', 'cherry_fence', 'bamboo_fence',
-    'crimson_fence', 'warped_fence', 'nether_brick_fence',
-    'oak_slab', 'spruce_slab', 'birch_slab', 'jungle_slab', 'acacia_slab',
-    'dark_oak_slab', 'mangrove_slab', 'cherry_slab', 'bamboo_slab',
-    'crimson_slab', 'warped_slab', 'stone_slab', 'smooth_stone_slab',
-    'cobblestone_slab', 'stone_brick_slab', 'brick_slab',
-    // 装饰/功能性方块
-    'glass', 'glass_pane', 'tinted_glass',
-    'white_wool', 'orange_wool', 'magenta_wool', 'light_blue_wool', 'yellow_wool',
-    'lime_wool', 'pink_wool', 'gray_wool', 'light_gray_wool', 'cyan_wool',
-    'purple_wool', 'blue_wool', 'brown_wool', 'green_wool', 'red_wool', 'black_wool',
-    'terracotta', 'white_terracotta', 'orange_terracotta', 'magenta_terracotta',
-    'light_blue_terracotta', 'yellow_terracotta', 'lime_terracotta', 'pink_terracotta',
-    'gray_terracotta', 'light_gray_terracotta', 'cyan_terracotta', 'purple_terracotta',
-    'blue_terracotta', 'brown_terracotta', 'green_terracotta', 'red_terracotta',
-    'black_terracotta',
-    'white_concrete', 'orange_concrete', 'magenta_concrete', 'light_blue_concrete',
-    'yellow_concrete', 'lime_concrete', 'pink_concrete', 'gray_concrete',
-    'light_gray_concrete', 'cyan_concrete', 'purple_concrete', 'blue_concrete',
-    'brown_concrete', 'green_concrete', 'red_concrete', 'black_concrete',
-    'white_carpet', 'orange_carpet', 'magenta_carpet', 'light_blue_carpet',
-    'yellow_carpet', 'lime_carpet', 'pink_carpet', 'gray_carpet', 'light_gray_carpet',
-    'cyan_carpet', 'purple_carpet', 'blue_carpet', 'brown_carpet', 'green_carpet',
-    'red_carpet', 'black_carpet',
-    'bookshelf', 'chiseled_bookshelf', 'crafting_table', 'furnace', 'blast_furnace',
-    'lantern', 'soul_lantern', 'torch', 'wall_torch', 'jack_o_lantern', 'sea_lantern',
-    'flower_pot', 'bedrock',
-];
-
-// 解析为方块 id 集合，供 unstuck 等模块按 type 快速判断是否受保护。
-// 懒加载：只在首次访问时解析一次，避免模块加载期 mcdata 未就绪。
-let _protectedBlockIdSet = null;
-export function getProtectedBlockIds() {
-    if (_protectedBlockIdSet === null) {
-        _protectedBlockIdSet = new Set();
-        for (const name of protectedBuildingBlocks) {
-            const id = mc.getBlockId(name);
-            if (id != null) _protectedBlockIdSet.add(id);
-        }
-    }
-    return _protectedBlockIdSet;
-}
-
 export function log(bot, message) {
     bot.output += message + '\n';
 }
@@ -244,10 +179,10 @@ export async function craftRecipe(bot, itemName, num = 1) {
 
 export async function wait(bot, milliseconds) {
     /**
-     * Waits for the given number of milliseconds.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {number} milliseconds, the number of milliseconds to wait.
-     * @returns {Promise<boolean>} true if the wait was successful, false otherwise.
+     * 等待指定数量的毫秒。
+     * @param {MinecraftBot} bot, 机器人引用。
+     * @param {number} milliseconds, 要等待的毫秒数。
+     * @returns {Promise<boolean>} 如果等待成功则返回 true，否则返回 false。
      * @example
      * await skills.wait(bot, 1000);
      **/
@@ -269,11 +204,11 @@ export async function wait(bot, milliseconds) {
 
 export async function smeltItem(bot, itemName, num = 1) {
     /**
-     * Puts 1 coal in furnace and smelts the given item name, waits until the furnace runs out of fuel or input items.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {string} itemName, the item name to smelt. Ores must contain "raw" like raw_iron.
-     * @param {number} num, the number of items to smelt. Defaults to 1.
-     * @returns {Promise<boolean>} true if the item was smelted, false otherwise. Fail
+     * 在熔炉中放入 1 个煤炭并冶炼指定物品，直到燃料耗尽或输入物品全部处理完毕。
+     * @param {MinecraftBot} bot, 机器人引用。
+     * @param {string} itemName, 要冶炼的物品名称。矿石必须包含 "raw"（如 raw_iron）。
+     * @param {number} num, 要冶炼的数量。默认为 1。
+     * @returns {Promise<boolean>} 如果物品冶炼成功则返回 true，否则返回 false。
      * @example
      * await skills.smeltItem(bot, "raw_iron");
      * await skills.smeltItem(bot, "beef");
@@ -419,9 +354,9 @@ export async function smeltItem(bot, itemName, num = 1) {
 
 export async function clearNearestFurnace(bot) {
     /**
-     * Clears the nearest furnace of all items.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @returns {Promise<boolean>} true if the furnace was cleared, false otherwise.
+     * 清空最近熔炉中的所有物品。
+     * @param {MinecraftBot} bot, 机器人引用。
+     * @returns {Promise<boolean>} 如果成功清空则返回 true，否则返回 false。
      * @example
      * await skills.clearNearestFurnace(bot);
      **/
@@ -499,12 +434,12 @@ async function openAnvilNearby(bot) {
 
 export async function combineItemsAtAnvil(bot, itemOneName, itemTwoName, newName = null) {
     /**
-     * Combine two items at an anvil. Used to repair tools/armor (e.g. two damaged pickaxes combine into one with more durability) or to merge enchantments from a book/enchanted item onto another item. Requires an anvil nearby (or one in the inventory to place).
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {string} itemOneName, the target item to repair/merge onto.
-     * @param {string} itemTwoName, the sacrifice item (same type for repair, or enchanted_book to transfer enchantments).
-     * @param {string} newName, optional new name to give the result item.
-     * @returns {Promise<boolean>} true if the items were combined, false otherwise.
+     * 在铁砧上组合两个物品。用于修复工具/盔甲（例如，两个损坏的镐子组合成一个耐久度更高的镐子）或将附魔从书籍/附魔物品合并到另一个物品上。需要附近有铁砧（或背包中有可放置的铁砧）。
+     * @param {MinecraftBot} bot, 机器人引用。
+     * @param {string} itemOneName, 目标物品（用于修复/合并）。
+     * @param {string} itemTwoName, 牺牲物品（相同类型用于修复，或附魔书用于转移附魔）。
+     * @param {string} newName, 结果物品的可选新名称。
+     * @returns {Promise<boolean>} 如果物品组合成功则返回 true，否则返回 false。
      * @example
      * await skills.combineItemsAtAnvil(bot, "diamond_pickaxe", "diamond_pickaxe");
      * await skills.combineItemsAtAnvil(bot, "diamond_sword", "enchanted_book");
@@ -540,11 +475,11 @@ export async function combineItemsAtAnvil(bot, itemOneName, itemTwoName, newName
 
 export async function renameItemAtAnvil(bot, itemName, newName) {
     /**
-     * Rename an item at an anvil. Costs experience levels.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {string} itemName, the item to rename.
-     * @param {string} newName, the new name to give the item.
-     * @returns {Promise<boolean>} true if the item was renamed, false otherwise.
+     * 在铁砧上重命名物品。消耗经验等级。
+     * @param {MinecraftBot} bot, 机器人引用。
+     * @param {string} itemName, 要重命名的物品名称。
+     * @param {string} newName, 要赋予物品的新名称。
+     * @returns {Promise<boolean>} 如果物品重命名成功则返回 true，否则返回 false。
      * @example
      * await skills.renameItemAtAnvil(bot, "diamond_sword", "Excalibur");
      **/
@@ -577,11 +512,11 @@ export async function renameItemAtAnvil(bot, itemName, newName) {
 
 export async function attackNearest(bot, mobType, kill = true) {
     /**
-     * Attack mob of the given type.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {string} mobType, the type of mob to attack.
-     * @param {boolean} kill, whether or not to continue attacking until the mob is dead. Defaults to true.
-     * @returns {Promise<boolean>} true if the mob was attacked, false if the mob type was not found.
+     * 攻击给定类型的生物。
+     * @param {MinecraftBot} bot, 机器人引用。
+     * @param {string} mobType, 要攻击的生物类型。
+     * @param {boolean} kill, 是否持续攻击直到生物死亡。默认为 true。
+     * @returns {Promise<boolean>} 如果成功攻击了生物则返回 true，如果未找到该类型的生物则返回 false。
      * @example
      * await skills.attackNearest(bot, "zombie", true);
      **/
@@ -616,10 +551,11 @@ function resumeAutoEat(bot, wasEnabled) {
 
 export async function attackEntity(bot, entity, kill = true) {
     /**
-     * Attack mob of the given type.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {Entity} entity, the entity to attack.
-     * @returns {Promise<boolean>} true if the entity was attacked, false if interrupted
+     * 攻击指定的实体。
+     * @param {MinecraftBot} bot, 机器人引用。
+     * @param {Entity} entity, 要攻击的实体。
+     * @param {boolean} kill, 是否持续攻击直到实体死亡。默认为 true。
+     * @returns {Promise<boolean>} 如果实体被攻击则返回 true，如果被中断则返回 false。
      * @example
      * await skills.attackEntity(bot, entity);
      **/
@@ -895,12 +831,12 @@ export async function defendSelf(bot, range = 9) {
 
 export async function collectBlock(bot, blockType, num = 1, exclude = null) {
     /**
-     * Collect one of the given block type.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {string} blockType, the type of block to collect.
-     * @param {number} num, the number of blocks to collect. Defaults to 1.
-     * @param {list} exclude, a list of positions to exclude from the search. Defaults to null.
-     * @returns {Promise<boolean>} true if the block was collected, false if the block type was not found.
+     * 收集指定类型的方块。
+     * @param {MinecraftBot} bot, 机器人引用。
+     * @param {string} blockType, 要收集的方块类型。
+     * @param {number} num, 要收集的数量。默认为 1。
+     * @param {list} exclude, 要在搜索中排除的位置列表。默认为 null。
+     * @returns {Promise<boolean>} 如果成功收集了方块则返回 true，否则返回 false。
      * @example
      * await skills.collectBlock(bot, "oak_log");
      **/
@@ -1311,39 +1247,67 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn = 'bottom', do
 
         // invert the facing direction
         let face = placeOn === 'north' ? 'south' : placeOn === 'south' ? 'north' : placeOn === 'east' ? 'west' : 'east';
-        if (blockType.includes('torch') && placeOn !== 'bottom') {
-            // insert wall_ before torch
-            blockType = blockType.replace('torch', 'wall_torch');
-            if (placeOn !== 'side' && placeOn !== 'top') {
-                blockType += `[facing=${face}]`;
+        // 社区蓝图可能已带完整状态串（如 acacia_stairs[half=bottom,...,facing=north]），
+        // 下面追加 [facing=...] 等时会重复 [，产生 facing=north][facing=east]。
+        // 解析已有 props 为 key->value，新增同 key 会覆盖（后值优先），再拼回单一 []。
+        let baseName = blockType;
+        const propsMap = new Map();
+        const sBracket = blockType.indexOf('[');
+        if (sBracket >= 0 && blockType.endsWith(']')) {
+            baseName = blockType.slice(0, sBracket);
+            for (const kv of blockType.slice(sBracket + 1, -1).split(',')) {
+                const eq = kv.indexOf('=');
+                if (eq > 0) propsMap.set(kv.slice(0, eq), kv.slice(eq + 1));
             }
         }
-        if (blockType.includes('button') || blockType === 'lever') {
+        function withProps(extra) {
+            // extra 形如 'facing=east'；同 key 覆盖已有值，避免 facing=north,facing=east 重复键
+            const eq = extra.indexOf('=');
+            if (eq > 0) propsMap.set(extra.slice(0, eq), extra.slice(eq + 1));
+            return baseName + '[' + [...propsMap.entries()].map(([k, v]) => k + '=' + v).join(',') + ']';
+        }
+        if (baseName.includes('torch') && placeOn !== 'bottom') {
+            // insert wall_ before torch
+            baseName = baseName.replace('torch', 'wall_torch');
+            if (placeOn !== 'side' && placeOn !== 'top') {
+                if (!propsMap.has('facing')) blockType = withProps(`facing=${face}`);
+                else blockType = withProps('');
+            } else {
+                blockType = withProps('');
+                if (propsMap.size === 0) blockType = baseName;
+            }
+        }
+        if (baseName.includes('button') || baseName === 'lever') {
             if (placeOn === 'top') {
-                blockType += `[face=ceiling]`;
+                if (!propsMap.has('face')) blockType = withProps(`face=ceiling`);
+                else blockType = withProps('');
             }
             else if (placeOn === 'bottom') {
-                blockType += `[face=floor]`;
+                if (!propsMap.has('face')) blockType = withProps(`face=floor`);
+                else blockType = withProps('');
             }
             else {
-                blockType += `[facing=${face}]`;
+                if (!propsMap.has('facing')) blockType = withProps(`facing=${face}`);
+                else blockType = withProps('');
             }
         }
-        if (blockType === 'ladder' || blockType === 'repeater' || blockType === 'comparator') {
-            blockType += `[facing=${face}]`;
+        if (baseName === 'ladder' || baseName === 'repeater' || baseName === 'comparator') {
+            if (!propsMap.has('facing')) blockType = withProps(`facing=${face}`);
+            else blockType = withProps('');
         }
-        if (blockType.includes('stairs')) {
-            blockType += `[facing=${face}]`;
+        if (baseName.includes('stairs')) {
+            if (!propsMap.has('facing')) blockType = withProps(`facing=${face}`);
+            else blockType = withProps('');
         }
         if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
         let msg = '/setblock ' + Math.floor(x) + ' ' + Math.floor(y) + ' ' + Math.floor(z) + ' ' + blockType;
         bot.chat(msg);
-        if (blockType.includes('door'))
+        if (baseName.includes('door'))
             if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
-        bot.chat('/setblock ' + Math.floor(x) + ' ' + Math.floor(y + 1) + ' ' + Math.floor(z) + ' ' + blockType + '[half=upper]');
-        if (blockType.includes('bed'))
+        bot.chat('/setblock ' + Math.floor(x) + ' ' + Math.floor(y + 1) + ' ' + Math.floor(z) + ' ' + withProps('half=upper'));
+        if (baseName.includes('bed'))
             if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
-        bot.chat('/setblock ' + Math.floor(x) + ' ' + Math.floor(y) + ' ' + Math.floor(z - 1) + ' ' + blockType + '[part=head]');
+        bot.chat('/setblock ' + Math.floor(x) + ' ' + Math.floor(y) + ' ' + Math.floor(z - 1) + ' ' + withProps('part=head'));
         log(bot, `使用 /setblock 在 ${target_dest} 放置了 ${blockType}。`);
         return true;
     }
@@ -1357,10 +1321,27 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn = 'bottom', do
     else if (item_name === 'lava') {
         item_name = 'lava_bucket';
     }
-    let block_item = bot.inventory.findInventoryItem(item_name);
+    // 带状态串的方块名（如 oak_button[face=wall,facing=west]）背包查不到，
+    // 剥掉 [状态] 用纯名查物品；状态只在 cheat 路径的 /setblock 才用。
+    const item_name_for_lookup = item_name.replace(/\[.*$/, '');
+    let block_item = bot.inventory.findInventoryItem(item_name_for_lookup);
     if (!block_item && bot.game.gameMode === 'creative' && !bot.restrict_to_inventory) {
-        await bot.creative.setInventorySlot(36, mc.makeItem(item_name, 1)); // 36 is first hotbar slot
-        block_item = bot.inventory.findInventoryItem(item_name);
+        // makeItem 对未知方块名返回 null/id=0 会让 Item.toNotch 崩，且
+        // bot.creative.setInventorySlot 抛错后槽标志不重置，该槽后续永远卡死
+        // （"Setting slot 36 cancelled"）。先校验物品 id 有效，无效直接报缺料；
+        // setInventorySlot 包 try/catch，失败时手动清槽 36 释放标志。
+        const itemId = mc.getItemId(item_name_for_lookup);
+        if (itemId == null) {
+            log(bot, `没有 ${item_name_for_lookup} 可以放置（未知物品名）。`);
+            return false;
+        }
+        try {
+            await bot.creative.setInventorySlot(36, mc.makeItem(item_name_for_lookup, 1));
+        } catch (err) {
+            log(bot, `补物到快捷栏失败：${err}。`);
+            return false;
+        }
+        block_item = bot.inventory.findInventoryItem(item_name_for_lookup);
     }
     if (!block_item) {
         log(bot, `没有 ${item_name} 可以放置。`);
@@ -1385,6 +1366,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn = 'bottom', do
     // get the buildoffblock and facevec based on whichever adjacent block is not empty
     let buildOffBlock = null;
     let faceVec = null;
+    let usedScaffold = null; // 脚手架墩位置（若本次用泥土垫出来的），放完目标块后收回
     const dir_map = {
         'top': Vec3(0, 1, 0),
         'bottom': Vec3(0, -1, 0),
@@ -1415,8 +1397,29 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn = 'bottom', do
         }
     }
     if (!buildOffBlock) {
-        log(bot, `无法在 ${targetBlock.position} 放置 ${blockType}：没有可放置的支撑面。`);
-        return false;
+        // 脚手架回退：目标格四周全是空气无支撑面时，自动在其下方放一个临时
+        // 泥土墩当支撑，放完目标块后收回。这样能盖悬空地板/屋顶，否则直接 fail。
+        // 仅在背包有泥土且目标格本身不是 dirt 时启用，避免无穷回退。
+        if (blockType !== 'dirt' && bot.inventory.findInventoryItem('dirt')) {
+            const scaffoldPos = target_dest.plus(Vec3(0, -1, 0));
+            let ok = false;
+            try {
+                ok = await placeBlock(bot, 'dirt', scaffoldPos.x, scaffoldPos.y, scaffoldPos.z, 'top', dontCheat);
+            } catch (err) { ok = false; }
+            if (ok) {
+                // 墩就位后重选支撑面：目标格下方现在变成可 buildOffBlock
+                const scaffoldBlock = bot.blockAt(scaffoldPos);
+                if (scaffoldBlock && !empty_blocks.includes(scaffoldBlock.name)) {
+                    buildOffBlock = scaffoldBlock;
+                    faceVec = new Vec3(0, 1, 0); // 朝上放目标块到墩顶
+                    usedScaffold = scaffoldPos; // 记下，放完目标块后收回
+                }
+            }
+        }
+        if (!buildOffBlock) {
+            log(bot, `无法在 ${targetBlock.position} 放置 ${blockType}：没有可放置的支撑面。`);
+            return false;
+        }
     }
 
     const pos = bot.entity.position;
@@ -1449,10 +1452,20 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn = 'bottom', do
             await bot.placeBlock(buildOffBlock, faceVec);
             log(bot, `在 ${target_dest} 放置了 ${blockType}。`);
             await new Promise(resolve => setTimeout(resolve, 200));
+            // 收回脚手架墩（如果在开头垫了泥土）。放完目标块后下方泥土已无用，
+            // 不收会污染构建体外观且浪费材料。breakBlockAt 内部已能处理寻路。
+            if (usedScaffold) {
+                try { await breakBlockAt(bot, usedScaffold.x, usedScaffold.y, usedScaffold.z); }
+                catch (err) { /* 收不回也无所谓，目标块已就位 */ }
+            }
             return true;
         }
     } catch (err) {
         log(bot, `在 ${target_dest} 放置 ${blockType} 失败。`);
+        // 失败也要尽力收回脚手架，避免留墩
+        if (usedScaffold) {
+            try { await breakBlockAt(bot, usedScaffold.x, usedScaffold.y, usedScaffold.z); } catch (_) { }
+        }
         return false;
     }
 }
@@ -1474,7 +1487,17 @@ export async function equip(bot, itemName) {
     let item = bot.inventory.slots.find(slot => slot && slot.name === itemName);
     if (!item) {
         if (bot.game.gameMode === "creative") {
-            await bot.creative.setInventorySlot(36, mc.makeItem(itemName, 1));
+            const itemId = mc.getItemId(itemName);
+            if (itemId == null) {
+                log(bot, `没有 ${itemName} 可以装备（未知物品名）。`);
+                return false;
+            }
+            try {
+                await bot.creative.setInventorySlot(36, mc.makeItem(itemName, 1));
+            } catch (err) {
+                log(bot, `补物到快捷栏失败：${err}。`);
+                return false;
+            }
             item = bot.inventory.findInventoryItem(itemName);
         }
         else {
@@ -2518,14 +2541,11 @@ export async function goToGoal(bot, goal) {
     nonDestructiveMovements.placeCost = 2;
 
     const destructiveMovements = new pf.Movements(bot);
-    // 破坏性 fallback 路径也要保护玩家建筑：把常见建筑方块加入禁止破坏列表，
-    // 这样即使非破坏性路径没规划出来，bot 也不会直接抄近道挖穿房顶/墙，
-    // 而是绕门或自然地形的缺口进入。仍可挖自然地形（泥土/石头/沙子/矿石等）脱困。
-    // 门/活板门/栅栏门是 interactable，pathfinder 会开它们而不挖，故不在此列。
-    for (const name of protectedBuildingBlocks) {
-        const id = mc.getBlockId(name);
-        if (id != null) destructiveMovements.blocksCantBreak.add(id);
-    }
+    // 破坏性 fallback 路径不再保护玩家建筑：原 protectedBuildingBlocks 已移除。
+    // 理由：bot 卡死时（unstuck 10s 超时会 cleanKill）出不去比挖穿一两块墙代价更大；
+    // 且保护清单只在「能挖但选择不挖」的中间态生效，纯封闭木屋仍会卡到超时。
+    // 破坏性 movements 用默认 blocksCantBreak（仅基岩等不可破坏方块），可挖所有自然物和建筑。
+    // 门/活板门/栅栏门是 interactable，pathfinder 会开它们而不挖。
 
     let final_movements = destructiveMovements;
 
@@ -2537,7 +2557,7 @@ export async function goToGoal(bot, goal) {
         log(bot, `找到了非破坏性路径。`);
     }
     else if (await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout).status === 'success') {
-        log(bot, `找到了破坏性路径（已保护玩家建筑）。`);
+        log(bot, `找到了破坏性路径。`);
     }
     else {
         log(bot, `未找到路径，但尝试使用破坏性移动继续导航。`);
@@ -2658,7 +2678,7 @@ export async function goToNearestBlock(bot, blockType, min_distance = 2, range =
             return b.position.x === block.position.x && b.position.y === block.position.y && b.position.z === block.position.z;
         }, 32, 128);
         count = all.length > 0 ? all.length : 1;
-    } catch (_) {}
+    } catch (_) { }
     log(bot, `在 ${block.position} 找到了 ${blockType}（附近约 ${count} 个），正在导航...`);
     const reached = await goToPosition(bot, block.position.x, block.position.y, block.position.z, min_distance);
     return reached;
@@ -3511,4 +3531,122 @@ export async function useToolOnBlock(bot, toolName, block) {
     }
     log(bot, `对 ${block.name} 使用了 ${toolName}。`);
     return true;
+}
+
+// --- 结构搭建 ---
+// AI 出一张蓝图，代码层负责承重排序、相邻连放、缺料断点。
+// 这样 AI 不必逐格调 placeBlock，从工程层消除"放不连续/考虑不清"。
+export function planBuildOrder(blueprint) {
+    // blueprint = { levels: [{ coordinates:[ox,oy,oz], placement:[[...]] }] }
+    // 把每个 level 展开成 {pos:[x,y,z], name} 列表，按层内承重顺序排好。
+    const steps = [];
+    if (!blueprint || !Array.isArray(blueprint.levels)) return steps;
+    for (let y = 0; y < blueprint.levels.length; y++) {
+        const lv = blueprint.levels[y];
+        if (!lv || !lv.coordinates || !lv.placement) continue;
+        const [ox, , oz] = lv.coordinates;
+        const oy = lv.coordinates[1];
+        const placement = lv.placement; // [z][x]
+        const rows = placement.length;
+        const cols = placement[0] ? placement[0].length : 0;
+        const cells = [];
+        for (let z = 0; z < rows; z++) {
+            for (let x = 0; x < cols; x++) {
+                const name = placement[z][x];
+                if (name === null || name === undefined || name === '') continue;
+                cells.push({ x, z, name });
+            }
+        }
+        // 层内排序：先四角承重柱，再外框，再内部填充。同优先级按 row-major。
+        const corner = c => (c.x === 0 || c.x === cols - 1) && (c.z === 0 || c.z === rows - 1);
+        const edge = c => c.x === 0 || c.x === cols - 1 || c.z === 0 || c.z === rows - 1;
+        const phase = c => corner(c) ? 0 : (edge(c) ? 1 : 2);
+        cells.sort((a, b) => phase(a) - phase(b) || a.z - b.z || a.x - b.x);
+        for (const c of cells) {
+            steps.push({
+                pos: [ox + c.x, oy, oz + c.z],
+                name: c.name,
+                phase: phase(c),
+            });
+        }
+    }
+    return steps;
+}
+
+export async function buildStructure(bot, blueprint, originX = null, originY = null, originZ = null) {
+    /**
+     * Build a structure from a blueprint. AI provides the blueprint and a
+     * starting origin; the code layer handles build ordering (承重柱先于外框
+     * 先于填充)、相邻格连放（不每格重新寻路）、脚手架回退（placeBlock 内部
+     * 已实现）和缺料断点。AI 不需要逐格调 placeBlock。
+     * @param {MinecraftBot} bot
+     * @param {object} blueprint, { levels: [{ coordinates:[ox,oy,oz], placement:[[...]] }] }
+     *   placement 是 [z][x] 二维数组，元素为方块名；null/'' 跳过，'air' 表示清除。
+     *   coordinates 是该层相对起点的 [x,y,z]。若调用方给了 originX/Y/Z，会用其覆盖
+     *   每层 coordinates 的 x/y/z（便于"在原地盖"），传 null 则用蓝图自带坐标。
+     * @param {number} originX, 起点 X（覆盖蓝图 coordinates[0]）。传 null 用蓝图坐标。
+     * @param {number} originY, 起点 Y。
+     * @param {number} originZ, 起点 Z。
+     * @returns {Promise<object>} { placed:number, missing:{name:n}, lastPos:[x,y,z] }
+     *   missing 非空表示缺料暂停，AI 补给后可用同名蓝图的剩余步骤继续（TODO 暂仅重调）。
+     * @example
+     * await skills.buildStructure(bot, blueprint, p.x, p.y, p.z);
+     **/
+    const steps = planBuildOrder(blueprint);
+    if (steps.length === 0) {
+        log(bot, `蓝图为空，没有要搭的方块。`);
+        return { placed: 0, missing: {}, lastPos: null };
+    }
+    bot.modes.pause('unstuck');
+    bot.modes.pause('idle_staring');
+    let placed = 0;
+    const missing = {};
+    let lastPos = null;
+    let prevTarget = null; // 上一格目标位置，用于相邻连放跳过寻路
+    try {
+        for (const step of steps) {
+            if (bot.interrupt_code) break;
+            const [bx, by, bz] = step.pos;
+            const [ox, oy, oz] = (originX != null) ? [originX, originY, originZ] : step.pos;
+            const tx = (originX != null) ? ox + (bx - steps[0].pos[0]) : bx;
+            const ty = (originX != null) ? oy + (by - steps[0].pos[1]) : by;
+            const tz = (originX != null) ? oz + (bz - steps[0].pos[2]) : bz;
+            const target = new Vec3(tx, ty, tz);
+
+            if (step.name === 'air') {
+                try { await breakBlockAt(bot, tx, ty, tz); } catch (_) { }
+                lastPos = [tx, ty, tz];
+                continue;
+            }
+
+            // 相邻连放：上一格与当前格曼哈顿距离≤1 且同 y 时，placeBlock 内部
+            // 仍会自检太近/太远，但通常已在 4.5 范围内，省掉重复 pathfinder.goto 开销。
+            const adjacent = prevTarget && Math.abs(prevTarget.x - tx) + Math.abs(prevTarget.y - ty) + Math.abs(prevTarget.z - tz) <= 1;
+            let ok;
+            if (adjacent) {
+                ok = await placeBlock(bot, step.name, tx, ty, tz, 'bottom', false);
+            } else {
+                ok = await placeBlock(bot, step.name, tx, ty, tz, 'bottom', false);
+            }
+            if (ok) {
+                placed++;
+                prevTarget = target;
+                lastPos = [tx, ty, tz];
+            } else {
+                const block_item = bot.inventory.findInventoryItem(step.name);
+                if (!block_item) {
+                    missing[step.name] = (missing[step.name] || 0) + 1;
+                    log(bot, `缺 ${step.name}，搭到 ${placed} 块后暂停。`);
+                    break;
+                }
+                // 有料但仍失败：跳过这一格继续，避免单格卡死整个结构
+                log(bot, `${step.name} 在 ${tx},${ty},${tz} 放置失败，跳过。`);
+            }
+        }
+    } finally {
+        bot.modes.unpause('unstuck');
+        bot.modes.unpause('idle_staring');
+    }
+    log(bot, `buildStructure 完成：放 ${placed} 块${Object.keys(missing).length ? `，缺料 ${Object.entries(missing).map(([k, v]) => k + ':' + v).join(', ')}` : ''}。`);
+    return { placed, missing, lastPos };
 }
