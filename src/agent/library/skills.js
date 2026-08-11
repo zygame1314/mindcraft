@@ -1430,15 +1430,56 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn = 'bottom', do
         // too close
         let goal = new pf.goals.GoalNear(targetBlock.position.x, targetBlock.position.y, targetBlock.position.z, 2);
         let inverted_goal = new pf.goals.GoalInvert(goal);
-        bot.pathfinder.setMovements(new pf.Movements(bot));
-        await bot.pathfinder.goto(inverted_goal);
+        // avoidDestructive 路径规划失败会抛 Timeout/NoPath——buildStructure 里
+        // placeBlock 是逐格调用，一格导航失败不应抛上去中止整栋建筑。捕获后退到
+        // "原地够不到就放不下"，返回 false 让 buildStructure 跳过该格继续。
+        try {
+            await goToGoal(bot, inverted_goal, true);
+        } catch (navErr) {
+            log(bot, `避开方块导航失败（${navErr?.name || ''}），跳过 ${blockType} 于 ${target_dest}。`);
+            return false;
+        }
     }
     if (bot.entity.position.distanceTo(targetBlock.position) > 4.5) {
         // too far
         let pos = targetBlock.position;
-        let movements = new pf.Movements(bot);
-        bot.pathfinder.setMovements(movements);
-        await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
+        // 目标太高时垫脚：在脚下放 dirt 搭柱，避免 pathfinder 挖墙
+        const targetY = pos.y;
+        if (targetY - Math.floor(bot.entity.position.y) > 1.5 && blockType !== 'dirt' && !bot._pillaring) {
+            bot._pillaring = true;
+            try {
+                // 创造模式背包通常没有真实 dirt 物品，countScaffoldingItems 为 0
+                // 导致 pathfinder 不会规划垫块。这里主动补一格 dirt 到快捷栏再垫。
+                let dirtItem = bot.inventory.findInventoryItem('dirt');
+                if (!dirtItem && bot.game.gameMode === 'creative' && !bot.restrict_to_inventory) {
+                    const dirtId = mc.getItemId('dirt');
+                    if (dirtId != null) {
+                        try { await bot.creative.setInventorySlot(36, mc.makeItem('dirt', 64)); }
+                        catch (_) { /* 补料失败则放弃，pathfinder 仍可尝试 */ }
+                        dirtItem = bot.inventory.findInventoryItem('dirt');
+                    }
+                }
+                while (dirtItem && Math.floor(bot.entity.position.y) < targetY - 1) {
+                    const feet = bot.entity.position.floored();
+                    const below = new Vec3(feet.x, feet.y - 1, feet.z);
+                    const blockBelow = bot.blockAt(below);
+                    if (!blockBelow || blockBelow.name !== 'air') break;
+                    const refBlock = bot.blockAt(below.offset(0, -1, 0));
+                    if (!refBlock || refBlock.name === 'air') break;
+                    await bot.equip(dirtItem, 'hand');
+                    await bot.lookAt(below.offset(0.5, 0.5, 0.5));
+                    await bot.placeBlock(refBlock, new Vec3(0, 1, 0));
+                    await new Promise(r => setTimeout(r, 200));
+                }
+            } catch { /* 垫脚失败不影响后续寻路 */ }
+            bot._pillaring = false;
+        }
+        try {
+            await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4), true);
+        } catch (navErr) {
+            log(bot, `靠近方块导航失败（${navErr?.name || ''}），跳过 ${blockType} 于 ${target_dest}。`);
+            return false;
+        }
     }
 
     // will throw error if an entity is in the way, and sometimes even if the block was placed
@@ -1451,6 +1492,11 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn = 'bottom', do
             await bot.lookAt(buildOffBlock.position.offset(0.5, 0.5, 0.5));
             await bot.placeBlock(buildOffBlock, faceVec);
             log(bot, `在 ${target_dest} 放置了 ${blockType}。`);
+            // 门放下去可能是开的、也可能是关的——取决于放置方向与朝向。不要强行
+            // 把它关上：pathfinder 的 useOne 分支已会先读 _properties.open，若已开就
+            // 跳过 activateBlock（不再去关），若关着才 activateBlock 开门。所以无论
+            // 门放下时是开是关，pathfinder 都能正确穿过。强行关门反而引入两次翻转
+            // （放时开→被关→到门口又被开），动画时序与寻路读状态错位就是"卡门"根因。
             await new Promise(resolve => setTimeout(resolve, 200));
             // 收回脚手架墩（如果在开头垫了泥土）。放完目标块后下方泥土已无用，
             // 不收会污染构建体外观且浪费材料。breakBlockAt 内部已能处理寻路。
@@ -1461,12 +1507,39 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn = 'bottom', do
             return true;
         }
     } catch (err) {
-        log(bot, `在 ${target_dest} 放置 ${blockType} 失败。`);
-        // 失败也要尽力收回脚手架，避免留墩
+        // 放置失败常见原因：直线距离够但中间有墙挡（distanceTo 穿墙算的），
+        // 或 bot 不在能放置的有效位置。先 goToGoal 移动到目标旁边再重试一次。
+        // goToGoal 会走非破坏性路径（开门/垫脚），失败才 fallback 破坏性。
+        log(bot, `在 ${target_dest} 放置 ${blockType} 失败，尝试移动后重试。`);
         if (usedScaffold) {
-            try { await breakBlockAt(bot, usedScaffold.x, usedScaffold.y, usedScaffold.z); } catch (_) { }
+            try { await breakBlockAt(bot, usedScaffold.x, usedScaffold.y, usedScaffold.z); } catch (_) { /* 收不回无所谓 */ }
         }
-        return false;
+        try {
+            await goToGoal(bot, new pf.goals.GoalNear(target_dest.x, target_dest.y, target_dest.z, 2), true);
+            // 重新选 buildOffBlock（移动后视角变了）
+            buildOffBlock = null; faceVec = null;
+            for (let d of dirs) {
+                const block = bot.blockAt(target_dest.plus(d));
+                if (!empty_blocks.includes(block.name)) {
+                    buildOffBlock = block;
+                    faceVec = new Vec3(-d.x, -d.y, -d.z);
+                    break;
+                }
+            }
+            if (!buildOffBlock) {
+                log(bot, `移动后仍无支撑面，放弃 ${blockType}。`);
+                return false;
+            }
+            await bot.equip(block_item, 'hand');
+            await bot.lookAt(buildOffBlock.position.offset(0.5, 0.5, 0.5));
+            await bot.placeBlock(buildOffBlock, faceVec);
+            log(bot, `移动后在 ${target_dest} 放置了 ${blockType}。`);
+            await new Promise(resolve => setTimeout(resolve, 200));
+            return true;
+        } catch (err2) {
+            log(bot, `移动后仍无法放置 ${blockType}：${err2?.message || err2}。`);
+            return false;
+        }
     }
 }
 
@@ -2525,42 +2598,71 @@ export async function giveToPlayer(bot, itemType, username, num = 1) {
     return success;
 }
 
-export async function goToGoal(bot, goal) {
+export async function goToGoal(bot, goal, avoidDestructive = false) {
     /**
      * Navigate to the given goal. Use doors and attempt minimally destructive movements.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {pf.goals.Goal} goal, the goal to navigate to.
+     * @param {boolean} avoidDestructive, 为 true 时不允许破坏性 fallback：非破坏性路径
+     *   规划失败也只用 nonDestructiveMovements（canDig=false，但仍可 place 泥土桥/脚手架）
+     *   继续导航。placeBlock 搭建筑时必须传 true——否则非破坏性路径绕不开墙时，
+     *   destructiveMovements 会直接挖穿刚搭好的墙体抄近道，「把自己的墙拆了垫脚」
+     *   的根因就在此。仅逃生/脱困等场景才允许破坏性 fallback。
      **/
 
     const nonDestructiveMovements = new pf.Movements(bot);
     const dontBreakBlocks = ['glass', 'glass_pane'];
-    for (let block of dontBreakBlocks) {
+    for (const block of dontBreakBlocks) {
         nonDestructiveMovements.blocksCantBreak.add(mc.getBlockId(block));
     }
     nonDestructiveMovements.canDig = false; // non-destructive path should never dig through blocks
     nonDestructiveMovements.placeCost = 2;
 
-    const destructiveMovements = new pf.Movements(bot);
-    // 破坏性 fallback 路径不再保护玩家建筑：原 protectedBuildingBlocks 已移除。
-    // 理由：bot 卡死时（unstuck 10s 超时会 cleanKill）出不去比挖穿一两块墙代价更大；
-    // 且保护清单只在「能挖但选择不挖」的中间态生效，纯封闭木屋仍会卡到超时。
-    // 破坏性 movements 用默认 blocksCantBreak（仅基岩等不可破坏方块），可挖所有自然物和建筑。
-    // 门/活板门/栅栏门是 interactable，pathfinder 会开它们而不挖。
+    // 非破坏性 movements 仍可 place（与 canDig 无关）：背包有 dirt/cobblestone 时
+    // pathfinder 会自动搭泥土桥跨沟、垫脚爬高，这正好是 placeBlock 想要的"垫脚"
+    // 替代挖墙。scafoldingBlocks 默认含 dirt+cobblestone，无需额外配置。
 
-    let final_movements = destructiveMovements;
+    // 创造模式背包通常没有真实 dirt/cobblestone 物品，countScaffoldingItems() 为 0
+    // 会导致 pathfinder 完全不规划"垫块"移动（getMoveForward 等因 remainingBlocks===0
+    // 直接 return）。补一格 dirt 到快捷栏，pathfinder 才能 place 它做脚手架/桥。
+    // setInventorySlot 失败不影响后续——只是少了垫块能力，仍会尝试普通寻路。
+    if (bot.game.gameMode === 'creative' && !bot.restrict_to_inventory &&
+        !bot.inventory.findInventoryItem('dirt') && !bot.inventory.findInventoryItem('cobblestone')) {
+        const dirtId = mc.getItemId('dirt');
+        if (dirtId != null) {
+            try { await bot.creative.setInventorySlot(36, mc.makeItem('dirt', 64)); }
+            catch (_) { /* 补料失败不阻塞，pathfinder 仍可尝试无垫块路径 */ }
+        }
+    }
 
-    // 非破坏性路径规划：给 3000ms（原来 1000ms 太短，稍复杂的绕门/绕地形路径
-    // 规划不完就判失败，直接 fallback 到破坏性路径抄近道挖穿房顶）。
+    let final_movements;
+
     const pathfind_timeout = 3000;
     if (await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout).status === 'success') {
         final_movements = nonDestructiveMovements;
         log(bot, `找到了非破坏性路径。`);
     }
-    else if (await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout).status === 'success') {
-        log(bot, `找到了破坏性路径。`);
+    else if (avoidDestructive) {
+        // placeBlock 场景：宁可到不了（让上层 _pillaring/脚手架兜底）也不能挖墙。
+        // 仍把非破坏性 movements 交给 pathfinder，靠它能 place 泥土尽量贴近目标。
+        final_movements = nonDestructiveMovements;
+        log(bot, `非破坏性路径未规划出，避免破坏性 fallback（不挖墙），尽量用搭桥/垫脚靠近。`);
     }
     else {
-        log(bot, `未找到路径，但尝试使用破坏性移动继续导航。`);
+        const destructiveMovements = new pf.Movements(bot);
+        // 破坏性 fallback 路径不再保护玩家建筑：原 protectedBuildingBlocks 已移除。
+        // 理由：bot 卡死时（unstuck 10s 超时会 cleanKill）出不去比挖穿一两块墙代价更大；
+        // 且保护清单只在「能挖但选择不挖」的中间态生效，纯封闭木屋仍会卡到超时。
+        // 破坏性 movements 用默认 blocksCantBreak（仅基岩等不可破坏方块），可挖所有自然物和建筑。
+        // 门/活板门/栅栏门是 interactable，pathfinder 会开它们而不挖。
+        if (await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout).status === 'success') {
+            final_movements = destructiveMovements;
+            log(bot, `找到了破坏性路径。`);
+        }
+        else {
+            final_movements = destructiveMovements;
+            log(bot, `未找到路径，但尝试使用破坏性移动继续导航。`);
+        }
     }
 
     bot.pathfinder.setMovements(final_movements);
@@ -3392,24 +3494,34 @@ export async function goToSurface(bot) {
      * @returns {Promise<boolean>} true if the surface was reached, false otherwise.
      **/
     const pos = bot.entity.position;
+    // 先检查头顶是否直接通天空（无方块遮挡），是则已在表面
+    let hasSky = true;
+    for (let y = Math.ceil(pos.y) + 1; y <= 320; y++) {
+        const block = bot.blockAt(new Vec3(Math.floor(pos.x), y, Math.floor(pos.z)));
+        if (block && block.name !== 'air' && block.name !== 'cave_air') { hasSky = false; break; }
+    }
+    if (hasSky) {
+        log(bot, `头顶通天空，已在表面。`);
+        return true;
+    }
     let surfaceY = null;
-    for (let y = 360; y > -64; y--) { // probably not the best way to find the surface but it works
+    for (let y = 360; y > -64; y--) {
         const block = bot.blockAt(new Vec3(pos.x, y, pos.z));
         if (!block || block.name === 'air' || block.name === 'cave_air') {
             continue;
         }
-        surfaceY = y + 1; // 站到该方块上方
+        surfaceY = y + 1;
         break;
     }
     if (surfaceY == null) {
         log(bot, `找不到当前位置上方的地表。`);
         return false;
     }
-    // 用 GoalY 而非 GoalNear(当前x,z,0)：从深坑回地表时，正上方那一列常被
-    // 2 格高墙挡住跳不上去，但周围有 1 格台阶可以逐级跳出。GoalNear 锁死到
-    // 当前 x,z 一列，pathfinder 只会死磕正前方的 2 高墙（跳不上去、挖也够
-    // 不到顶），耗到 unstuck 触发也不解决，最终卡死。GoalY 只要求到达该 y
-    // 层、不限 x/z，pathfinder 就能转向周围 1 格台阶逐级攀爬脱困。
+    // 如果 bot 当前 y 离地表不到 3 格（比如在房子里），直接算成功
+    if (Math.abs(pos.y - surfaceY) < 3) {
+        log(bot, `已在 y=${surfaceY} 地表附近。`);
+        return true;
+    }
     await goToGoal(bot, new pf.goals.GoalY(surfaceY));
     const distY = Math.abs(bot.entity.position.y - surfaceY);
     if (distY < 2) {
@@ -3560,7 +3672,13 @@ export function planBuildOrder(blueprint) {
         // 层内排序：先四角承重柱，再外框，再内部填充。同优先级按 row-major。
         const corner = c => (c.x === 0 || c.x === cols - 1) && (c.z === 0 || c.z === rows - 1);
         const edge = c => c.x === 0 || c.x === cols - 1 || c.z === 0 || c.z === rows - 1;
-        const phase = c => corner(c) ? 0 : (edge(c) ? 1 : 2);
+        // 门/活板门等多格方块要在同侧墙体封死前先放，否则 bot 沿墙一路搭到门口
+        // 时墙已闭合，被自己刚搭好的墙围住、够不到门那格——表现为「有门不进」、
+        // 寻路超时中止整栋。把这些"开口件"提到 edge 阶段最前（phase 1.0），
+        // 它们放完留下门洞，bot 站在门洞旁就能继续放剩余外框，不会再被围死。
+        const isAperture = c => typeof c.name === 'string' &&
+            (c.name.includes('door') || c.name.includes('trapdoor'));
+        const phase = c => corner(c) ? 0 : (edge(c) ? (isAperture(c) ? 1.0 : 1.5) : 2);
         cells.sort((a, b) => phase(a) - phase(b) || a.z - b.z || a.x - b.x);
         for (const c of cells) {
             steps.push({

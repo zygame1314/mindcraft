@@ -3,40 +3,208 @@
     "offset": -1,
     "blocks": [
         [
-            ["", "", "", "", ""],
-            ["", "planks", "planks", "planks", ""],
-            ["", "planks", "planks", "planks", ""],
-            ["", "planks", "planks", "planks", ""],
-            ["", "planks", "planks", "planks", ""],
-            ["", "", "planks", "", ""],
-            ["", "", "", "", ""]
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ],
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ],
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ],
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ],
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ],
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ],
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ]
         ],
         [
-            ["log", "planks", "planks", "planks", "log"],
-            ["planks", "chest", "bed", "air", "planks"],
-            ["planks", "air", "bed", "air", "planks"],
-            ["planks", "air", "air", "air", "planks"],
-            ["planks", "air", "air", "air", "planks"],
-            ["log", "planks", "door", "planks", "log"],
-            ["", "air", "air", "air", ""]
+            [
+                "log",
+                "planks",
+                "glass",
+                "planks",
+                "log"
+            ],
+            [
+                "planks",
+                "",
+                "",
+                "",
+                "planks"
+            ],
+            [
+                "glass",
+                "",
+                "",
+                "",
+                "glass"
+            ],
+            [
+                "planks",
+                "",
+                "",
+                "",
+                "planks"
+            ],
+            [
+                "glass",
+                "",
+                "",
+                "",
+                "glass"
+            ],
+            [
+                "planks",
+                "",
+                "",
+                "",
+                "planks"
+            ],
+            [
+                "log",
+                "planks",
+                "",
+                "planks",
+                "log"
+            ]
         ],
         [
-            ["log", "planks", "planks", "planks", "log"],
-            ["planks", "torch", "air", "torch", "planks"],
-            ["planks", "air", "air", "air", "planks"],
-            ["planks", "air", "air", "air", "planks"],
-            ["planks", "torch", "air", "torch", "planks"],
-            ["log", "planks", "door", "planks", "log"],
-            ["", "air", "air", "air", ""]
+            [
+                "log",
+                "planks",
+                "glass",
+                "planks",
+                "log"
+            ],
+            [
+                "planks",
+                "torch",
+                "",
+                "torch",
+                "planks"
+            ],
+            [
+                "glass",
+                "",
+                "",
+                "",
+                "glass"
+            ],
+            [
+                "planks",
+                "",
+                "",
+                "",
+                "planks"
+            ],
+            [
+                "glass",
+                "",
+                "",
+                "",
+                "glass"
+            ],
+            [
+                "planks",
+                "torch",
+                "",
+                "torch",
+                "planks"
+            ],
+            [
+                "log",
+                "planks",
+                "",
+                "planks",
+                "log"
+            ]
         ],
         [
-            ["air", "air", "air", "air", "air"],
-            ["air", "planks", "planks", "planks", "air"],
-            ["planks", "planks", "planks", "planks", "planks"],
-            ["planks", "planks", "planks", "planks", "planks"],
-            ["air", "planks", "planks", "planks", "air"],
-            ["air", "air", "air", "air", "air"],
-            ["", "air", "air", "air", ""]
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ],
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ],
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ],
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ],
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ],
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ],
+            [
+                "planks",
+                "planks",
+                "planks",
+                "planks",
+                "planks"
+            ]
         ]
     ]
 }

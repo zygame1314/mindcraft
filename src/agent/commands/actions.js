@@ -107,6 +107,8 @@ function makePresetBlueprint(type, block, width, height, ox, oy, oz) {
 //     会因 findInventoryItem('planks') 失败而放不下。故这里先做一次"尽力解析"：
 //     若背包里有该 generic 的任意木种实例，挑背包里最多的那种替换；查不到就
 //     原样传下去，让 placeBlock 自己报"没有 planks"（AI 据此去伐木）。
+//   - 多格方块（door/bed）在蓝图里只写"主格"一次，placeBlock 放下后游戏会
+//     自动占据另一半格，不要在蓝图里把两格都写一遍，否则会重叠相撞被拆。
 //   - 'air' 保留，buildStructure 会调 breakBlockAt 清掉。
 //   - '' 空串/null 跳过（不写进 levels，省一格空操作）。
 function resolveGenericBlockName(bot, name) {
@@ -197,8 +199,14 @@ function blockNameToItemName(blockName) {
     // double 半砖（如 deepslate_brick_slab[type=double]）放下去算 1 块，
     // 但生存合成/采集时按 1 个普通半砖算（放置两块叠成 double，游戏内部如此）。
     // 为简化材料统计，double 当 1 个同名半砖物品计。
-    // 这里直接返回 base，状态已剥掉，base 就是 deepslate_brick_slab。
-    return BLOCK_TO_ITEM_NAME[base] || base;
+    let item = BLOCK_TO_ITEM_NAME[base] || base;
+    // generic 木方块名（planks/log/door/fence/slab/stairs/trapdoor/button/pressure_plate/
+    // fence_gate/sign/boat）在生存采集/合成时要用具体木种，材料清单按默认 oak_* 列出，
+    // 提示玩家可换成背包里已有的其他木种（实际放置时 resolveGenericBlockName 会按背包挑）。
+    if (mc.MATCHING_WOOD_BLOCKS.includes(item)) item = 'oak_' + item;
+    // generic 床按默认 red_bed 列出
+    if (item === 'bed') item = 'red_bed';
+    return item;
 }
 
 // 统计蓝图所需材料（物品名->数量），air/空不计。

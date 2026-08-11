@@ -3,40 +3,208 @@
     "offset": -1,
     "blocks": [
         [
-            ["", "", "", "", ""],
-            ["", "planks", "planks", "planks", ""],
-            ["", "planks", "planks", "planks", ""],
-            ["", "planks", "planks", "planks", ""],
-            ["", "planks", "planks", "planks", ""],
-            ["", "", "planks", "", ""],
-            ["", "", "", "", ""]
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ]
         ],
         [
-            ["cobblestone", "cobblestone", "cobblestone", "cobblestone", "cobblestone"],
-            ["cobblestone", "chest", "bed", "air", "cobblestone"],
-            ["cobblestone", "air", "bed", "air", "cobblestone"],
-            ["cobblestone", "air", "air", "air", "cobblestone"],
-            ["cobblestone", "air", "air", "air", "cobblestone"],
-            ["cobblestone", "cobblestone", "door", "cobblestone", "cobblestone"],
-            ["", "air", "air", "air", ""]
+            [
+                "cobblestone",
+                "cobblestone",
+                "glass",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "",
+                "",
+                "",
+                "cobblestone"
+            ],
+            [
+                "glass",
+                "",
+                "",
+                "",
+                "glass"
+            ],
+            [
+                "cobblestone",
+                "",
+                "",
+                "",
+                "cobblestone"
+            ],
+            [
+                "glass",
+                "",
+                "",
+                "",
+                "glass"
+            ],
+            [
+                "cobblestone",
+                "",
+                "",
+                "",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "",
+                "cobblestone",
+                "cobblestone"
+            ]
         ],
         [
-            ["cobblestone", "cobblestone", "cobblestone", "cobblestone", "cobblestone"],
-            ["cobblestone", "torch", "air", "torch", "cobblestone"],
-            ["cobblestone", "air", "air", "air", "cobblestone"],
-            ["cobblestone", "air", "air", "air", "cobblestone"],
-            ["cobblestone", "torch", "air", "torch", "cobblestone"],
-            ["cobblestone", "cobblestone", "door", "cobblestone", "cobblestone"],
-            ["", "air", "air", "air", ""]
+            [
+                "cobblestone",
+                "cobblestone",
+                "glass",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "torch",
+                "",
+                "torch",
+                "cobblestone"
+            ],
+            [
+                "glass",
+                "",
+                "",
+                "",
+                "glass"
+            ],
+            [
+                "cobblestone",
+                "",
+                "",
+                "",
+                "cobblestone"
+            ],
+            [
+                "glass",
+                "",
+                "",
+                "",
+                "glass"
+            ],
+            [
+                "cobblestone",
+                "torch",
+                "",
+                "torch",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "",
+                "cobblestone",
+                "cobblestone"
+            ]
         ],
         [
-            ["air", "air", "air", "air", "air"],
-            ["air", "cobblestone", "cobblestone", "cobblestone", "air"],
-            ["cobblestone", "cobblestone", "cobblestone", "cobblestone", "cobblestone"],
-            ["cobblestone", "cobblestone", "cobblestone", "cobblestone", "cobblestone"],
-            ["air", "cobblestone", "cobblestone", "cobblestone", "air"],
-            ["air", "air", "air", "air", "air"],
-            ["", "air", "air", "air", ""]
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ],
+            [
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone",
+                "cobblestone"
+            ]
         ]
     ]
 }
